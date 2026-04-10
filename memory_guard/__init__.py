@@ -24,6 +24,28 @@ Quick start:
 
 __version__ = "0.1.0"
 
+# ---------------------------------------------------------------------------
+# Lazy imports — HF/Unsloth adapters are only resolved on first attribute
+# access so that ``import memory_guard`` works on a torch-free machine.
+# ---------------------------------------------------------------------------
+
+_LAZY_ADAPTER_ATTRS = {
+    "MemoryGuardCallback": "memory_guard.adapters.huggingface",
+    "guard_trainer": "memory_guard.adapters.huggingface",
+}
+
+
+def __getattr__(name: str) -> object:
+    if name in _LAZY_ADAPTER_ATTRS:
+        import importlib
+        mod = importlib.import_module(_LAZY_ADAPTER_ATTRS[name])
+        obj = getattr(mod, name)
+        # Cache on the module so subsequent accesses skip __getattr__
+        globals()[name] = obj
+        return obj
+    raise AttributeError(f"module 'memory_guard' has no attribute {name!r}")
+
+
 from .estimator import (
     MemoryEstimate,
     ModelSpec,
@@ -73,4 +95,7 @@ __all__ = [
     "record_training_result",
     "auto_downgrade",
     "DowngradeResult",
+    # HuggingFace adapter (lazy — resolved only on access)
+    "MemoryGuardCallback",
+    "guard_trainer",
 ]
