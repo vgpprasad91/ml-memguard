@@ -35,7 +35,9 @@ classifiers = [
 [project.optional-dependencies]
 cuda = ["torch>=2.0"]
 apple = ["mlx>=0.10"]
-all = ["torch>=2.0", "mlx>=0.10", "psutil>=5.9"]
+hf = ["transformers>=4.30", "torch>=2.0"]
+unsloth = ["unsloth", "transformers>=4.30", "torch>=2.0"]
+all = ["torch>=2.0", "mlx>=0.10", "psutil>=5.9", "transformers>=4.30"]
 dev = ["pytest>=7.0", "pytest-cov>=4.0", "mypy>=1.0", "ruff>=0.1"]
 
 [project.urls]
