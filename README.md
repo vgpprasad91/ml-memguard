@@ -4,8 +4,16 @@
 
 No more frozen Macs. No more `CUDA out of memory`. Just training that works.
 
-```
-pip install ml-memguard
+[![PyPI version](https://img.shields.io/pypi/v/ml-memguard.svg)](https://pypi.org/project/ml-memguard/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/pypi/pyversions/ml-memguard.svg)](https://pypi.org/project/ml-memguard/)
+
+```bash
+pip install ml-memguard                  # core (zero dependencies)
+pip install ml-memguard[hf]             # + HuggingFace Transformers adapter
+pip install ml-memguard[unsloth]        # + Unsloth adapter
+pip install ml-memguard[apple]          # + MLX Metal ground-truth monitoring
+pip install ml-memguard[cuda]           # + CUDA OOM recovery
 ```
 
 ## The Problem
@@ -217,8 +225,9 @@ trainer.train()
 
 ## Framework Adapters
 
-New in v0.2 — adapters read the model's architecture automatically so you don't
-have to look up `hidden_size`, `num_heads`, or `num_layers`.
+*New in v0.2.0* — adapters read the model's architecture automatically so you
+don't have to look up `hidden_size`, `num_heads`, or `num_layers`.
+Full reference: [`docs/adapters.md`](docs/adapters.md).
 
 ### How model introspection works
 
@@ -313,7 +322,10 @@ Measured accuracy on real training runs. **We need your help expanding this tabl
 | Qwen3.5-9B-4bit | M4 Max 36GB | 1 | 512 | 8 | 6,193 MB | 7,048 MB | 12.1% under |
 | Qwen3.5-9B-4bit | M4 Max 36GB | 1 | 128 | 16 | 9,522 MB | 8,879 MB | 7.2% over |
 
-**What's tested**: LoRA fine-tuning with mlx_lm on Apple Silicon (M4 Max).
+**What's tested**:
+- LoRA fine-tuning with mlx_lm on Apple Silicon (M4 Max)
+- HuggingFace `Trainer` + `MemoryGuardCallback` end-to-end (distilgpt2, CPU, fp32) — integration smoke test passes in CI
+- BnB 4-bit + double-quantization detection and 5 % correction (unit-tested against mock models)
 
 **What's NOT tested yet**:
 - CUDA GPUs (RTX 3060/4090, A100, H100)
@@ -322,9 +334,8 @@ Measured accuracy on real training runs. **We need your help expanding this tabl
 - Models below 7B or above 13B
 - MoE architectures (Mixtral, DeepSeek-MoE)
 - Multi-modal models (LLaVA, Qwen-VL)
-- QLoRA with double quantization
 - DoRA, full fine-tuning
-- HuggingFace Transformers, Unsloth, PyTorch Lightning
+- PyTorch Lightning, Axolotl, LitGPT
 
 The estimation formula is based on published research (FlashAttention, HyC-LoRA, LoRA-FA) and verified on one configuration. Auto-calibration improves accuracy after 3+ runs on any given setup.
 
@@ -370,7 +381,8 @@ Then open a [GitHub issue](https://github.com/vgpprasad91/ml-memguard/issues/new
 ### Other Contributions
 
 - **Inference monitoring**: KV cache growth tracking for serving workloads
-- **Framework adapters**: PyTorch Lightning, Axolotl, LitGPT wrappers
+- **Framework adapters**: PyTorch Lightning, Axolotl, LitGPT wrappers (HF Transformers and Unsloth ship in v0.2.0)
+- **Accuracy data**: Real training runs on CUDA or non-Apple hardware — see the table above
 - **Bug reports**: If the estimate was off by >30%, that's a bug — please report it with your config
 
 ## License
