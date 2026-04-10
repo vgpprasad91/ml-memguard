@@ -34,6 +34,8 @@ _LAZY_ADAPTER_ATTRS = {
     "guard_trainer": "memory_guard.adapters.huggingface",
     "guard_unsloth_model": "memory_guard.adapters.unsloth",
     "guard_sft_trainer": "memory_guard.adapters.unsloth",
+    "guard_vllm": "memory_guard.adapters.vllm",
+    "guard_sglang": "memory_guard.adapters.sglang",
 }
 
 
@@ -110,4 +112,8 @@ __all__ = [
     # Unsloth adapter (lazy — resolved only on access)
     "guard_unsloth_model",
     "guard_sft_trainer",
+    # vLLM adapter (lazy — resolved only on access)
+    "guard_vllm",
+    # SGLang adapter (lazy — resolved only on access)
+    "guard_sglang",
 ]
