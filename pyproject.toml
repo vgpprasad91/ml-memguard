@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ml-memguard"
 version = "0.4.0"
-description = "Cross-platform memory guard for ML training and inference serving. Prevents OOM crashes on Apple Silicon, CUDA, and CPU by proactive estimation and runtime monitoring."
+description = "Stop OOM crashes in vLLM, SGLang, Unsloth, and HuggingFace. Proactive memory estimation and runtime KV-cache monitoring for LLM inference serving and fine-tuning on Apple Silicon, CUDA, and CPU."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.9"
@@ -13,6 +13,8 @@ authors = [{ name = "Guru Prasad Venkataraghavan", email = "vguruprasad91@gmail.
 keywords = [
     "machine-learning", "memory", "oom", "apple-silicon", "cuda",
     "training", "llm", "fine-tuning", "lora", "moe",
+    "inference", "vllm", "sglang", "kv-cache", "llm-serving",
+    "inference-server", "gpu-memory", "oom-prevention", "serving",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

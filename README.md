@@ -1,8 +1,8 @@
 # memory-guard
 
-**Cross-platform memory guard for ML training and inference serving. Prevents OOM crashes on Apple Silicon, CUDA, and CPU. Learns optimal configs from experience.**
+**Stop `No available memory for cache blocks` in vLLM. Stop `CUDA out of memory` in Unsloth. Stop frozen Macs in mlx_lm. Works across inference serving and fine-tuning — and learns optimal configs from experience.**
 
-No more frozen Macs. No more `CUDA out of memory`. Just training that works — and gets smarter every run.
+No more `gpu_memory_utilization` trial-and-error. No more KV cache crashes at 3 AM. No more wasted GPU-hours on jobs that OOM in the first minute.
 
 [![PyPI version](https://img.shields.io/pypi/v/ml-memguard.svg)](https://pypi.org/project/ml-memguard/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
@@ -20,15 +20,50 @@ pip install ml-memguard[sglang]         # + SGLang inference serving adapter
 
 ## The Problem
 
-- **Apple Silicon**: No OOM exception exists. When you exceed memory, macOS silently swaps to disk, your Mac freezes for minutes, and eventually the OS kills your process. Every ML practitioner on Mac has experienced this.
+### Inference serving (vLLM / SGLang / Ollama)
+
+`No available memory for the cache blocks. Try increasing gpu_memory_utilization` is vLLM's most-filed error. It appears when `--gpu-memory-utilization`, `--max-num-seqs`, and `--max-num-batched-tokens` are misconfigured — which they almost always are on first deploy. There is no formula; the official advice is to tune until it stops crashing. When it does crash mid-serving, it takes live user traffic down with it.
+
+- vLLM has 30+ distinct numbered OOM issues. SGLang has a dedicated OOM tracking issue. Ollama makes the host unresponsive.
+- KV cache grows linearly with context length × batch size × layers. A 128k-context Llama 3 70B needs ~40 GB of KV cache on top of ~140 GB for weights.
+- There is no built-in tool that tells you the right `max_num_seqs` before you launch.
+
+### Fine-tuning (Unsloth / HuggingFace / mlx_lm)
+
+- **Apple Silicon**: No OOM exception exists. When you exceed memory, macOS silently swaps to disk, your Mac freezes for minutes, and eventually the OS kills your process.
 - **CUDA**: `torch.cuda.OutOfMemoryError` crashes your training run. You restart, guess a smaller batch size, and pray.
 - **Containers**: cgroups silently kill your process with no warning when you hit the memory limit.
 
-Existing solutions (PyTorch Lightning BatchSizeFinder, HuggingFace `accelerate`) are CUDA-only and reactive — they catch OOM exceptions that don't exist on Apple Silicon.
+Existing solutions (PyTorch Lightning BatchSizeFinder, HuggingFace `accelerate`) are CUDA-only and reactive — they catch OOM exceptions that don't exist on Apple Silicon and do nothing for inference servers.
 
 ## The Solution
 
-`memory-guard` is **proactive, not reactive**. It estimates peak memory *before* training starts and auto-adjusts your config to fit. During training, it monitors memory pressure and dynamically downgrades if needed.
+`memory-guard` is **proactive, not reactive**. For inference: it calculates the safe `max_num_seqs` before you launch the server and monitors KV cache utilization at runtime. For fine-tuning: it estimates peak memory before training starts and auto-adjusts batch size, LoRA rank, and sequence length to fit. Both paths use an RL optimizer that learns your specific device over time.
+
+**Inference serving (vLLM)**
+
+```python
+from memory_guard import guard_vllm
+from vllm import LLM
+
+llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", gpu_memory_utilization=0.9)
+
+safe = guard_vllm(llm)
+# InferenceSafeConfig:
+#   max_num_seqs:     32         <- largest concurrent batch that fits
+#   max_seq_len:      4096
+#   estimated memory: 18,240 MB
+#   budget:           19,456 MB
+
+# Wire the KV cache monitor — fires on_shed_load at 92% utilization
+safe.monitor.on_shed_load = lambda u: load_balancer.reduce_weight("primary", 0)
+safe.monitor.on_warning   = lambda u: logger.warning("KV cache at %.0f%%", u * 100)
+
+with safe.monitor.session():
+    server.serve_forever()   # monitor runs in background thread
+```
+
+**Fine-tuning (Unsloth / HuggingFace / mlx_lm)**
 
 ```python
 from memory_guard import MemoryGuard
@@ -65,6 +100,19 @@ with guard.monitor(safe.batch_size) as mon:
 
 ## Features
 
+### Inference serving
+
+| Feature | vLLM | SGLang | Ollama / custom |
+|---------|:---:|:---:|:---:|
+| Safe `max_num_seqs` pre-flight | Yes | Yes | Yes (via `preflight_inference`) |
+| KV cache utilization monitoring | Yes | Yes | Yes (`KVCacheMonitor`) |
+| Load-shed signal at 92% KV utilization | Yes | Yes | Yes |
+| Warning signal at 80% KV utilization | Yes | Yes | Yes |
+| RL optimizer (learns per device/model) | Yes | Yes | Yes |
+| Architecture auto-introspection | Yes (hf_config) | Yes (server_args) | Manual |
+
+### Fine-tuning
+
 | Feature | Apple Silicon | CUDA | Linux CPU | Windows |
 |---------|:---:|:---:|:---:|:---:|
 | Proactive memory estimation | Yes | Yes | Yes | Yes |
@@ -79,6 +127,14 @@ with guard.monitor(safe.batch_size) as mon:
 | GQA / MoE / Multi-modal | Yes | Yes | Yes | Yes |
 
 ## How It Works
+
+### Inference serving path
+
+`preflight_inference()` computes the memory footprint of model weights + KV cache at a given `max_num_seqs` and `max_seq_len`, then binary-searches for the largest concurrent batch that fits within your GPU budget (default: 80% of available VRAM). The RL optimizer learns which `max_num_seqs` value worked well on your device and model over time, replacing binary search with a confident recommendation after a handful of runs.
+
+`KVCacheMonitor` runs a background thread polling the live KV cache token counts from vLLM or SGLang. At 80% utilization it fires `on_warning`; at 92% it fires `on_shed_load`. Neither callback does anything by default — they are signals. Your load balancer or health endpoint decides what to do (reduce upstream weight, return 503, etc.). The engine is never mutated while serving.
+
+### Fine-tuning path
 
 ### 1. Proactive Estimation
 
@@ -139,6 +195,44 @@ guard.record_result(
 The policy is a plain JSON file — human-readable, editable, and deletable.  See [`docs/rl_optimizer.md`](docs/rl_optimizer.md) for the full reference and [`docs/decisions/004-rl-contextual-bandit.md`](docs/decisions/004-rl-contextual-bandit.md) for the design rationale.
 
 ## Framework Integration
+
+### With vLLM
+
+```python
+from memory_guard import guard_vllm
+from vllm import LLM
+
+llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", gpu_memory_utilization=0.9)
+safe = guard_vllm(llm)
+
+# safe.max_num_seqs  → pass to --max-num-seqs
+# safe.monitor       → KVCacheMonitor, ready to start
+
+safe.monitor.on_shed_load = lambda u: load_balancer.reduce_weight("primary", 0)
+safe.monitor.on_warning   = lambda u: logger.warning("KV cache %.0f%%", u * 100)
+
+with safe.monitor.session():
+    server.serve_forever()
+```
+
+`guard_vllm` reads architecture directly from `model_config.hf_config` — no manual `hidden_dim` or `num_layers` required.
+
+### With SGLang
+
+```python
+from memory_guard import guard_sglang
+from sglang import Runtime
+
+runtime = Runtime(model_path="meta-llama/Llama-3.1-8B-Instruct")
+safe = guard_sglang(runtime)
+
+safe.monitor.on_shed_load = lambda u: nginx.upstream_weight("primary", 0)
+
+with safe.monitor.session():
+    runtime.wait()
+```
+
+Polls `token_to_kv_pool` (preferred) or `scheduler.get_stats()` as fallback. Rolling-max smoothing suppresses false-recovery signals from RadixAttention prefix-cache evictions.
 
 ### With mlx_lm (Apple Silicon)
 
@@ -294,25 +388,51 @@ refines the correction further.
 
 ## API Reference
 
-### `MemoryGuard.auto(safety_ratio=0.80)`
+### Inference Serving (v0.3+)
+
+#### `guard.preflight_inference(...) -> InferenceSafeConfig`
+Find the largest `max_num_seqs` that fits in your GPU budget. Binary-searches from your requested max down to 1; uses the RL optimizer if it has learned this device/model combination.
+
+```python
+safe = guard.preflight_inference(
+    model_params=8e9, model_bits=4,
+    hidden_dim=4096, num_kv_heads=8, num_layers=32,
+    max_seq_len=4096, max_num_seqs=256,
+)
+# safe.max_num_seqs  → int, largest safe concurrent batch
+# safe.monitor       → KVCacheMonitor (not yet started)
+```
+
+#### `guard_vllm(llm, ...) -> InferenceSafeConfig`
+One call. Reads architecture from `model_config.hf_config`, runs preflight, returns `InferenceSafeConfig`. No manual config spelunking.
+
+#### `guard_sglang(runtime, ...) -> InferenceSafeConfig`
+Same as `guard_vllm` for SGLang. Reads `server_args.context_length` and `server_args.max_running_requests`.
+
+#### `KVCacheMonitor`
+Background-thread monitor. Fires `on_warning` at 80% KV utilization, `on_shed_load` at 92%. Start with `safe.monitor.session()` context manager or `safe.monitor.start()` / `safe.monitor.stop()` directly.
+
+### Fine-Tuning
+
+#### `MemoryGuard.auto(safety_ratio=0.80)`
 Create with auto-detected platform. `safety_ratio` controls headroom (0.80 = use 80% of available).
 
-### `guard.preflight(**config) -> SafeConfig`
+#### `guard.preflight(**config) -> SafeConfig`
 Estimate memory and auto-downgrade. Returns safe config.
 
-### `guard.monitor(batch_size) -> RuntimeMonitor`
+#### `guard.monitor(batch_size) -> RuntimeMonitor`
 Context manager for runtime monitoring. Use `mon.current_batch_size` in training loop.
 
-### `guard.estimate(**config) -> MemoryEstimate`
+#### `guard.estimate(**config) -> MemoryEstimate`
 Pure estimation without auto-downgrade.
 
-### `estimate_training_memory(**config) -> MemoryEstimate`
+#### `estimate_training_memory(**config) -> MemoryEstimate`
 Standalone estimation function.
 
-### `auto_downgrade(budget_mb, **config) -> DowngradeResult`
+#### `auto_downgrade(budget_mb, **config) -> DowngradeResult`
 Standalone downgrade function.
 
-### `CUDAOOMRecovery(initial_batch_size)`
+#### `CUDAOOMRecovery(initial_batch_size)`
 CUDA-specific OOM catch-and-retry wrapper.
 
 ### RL Optimizer (v0.4)
@@ -337,7 +457,7 @@ Convenience constructor for use with `BanditPolicy.q_value()` and
 
 Full reference: [`docs/rl_optimizer.md`](docs/rl_optimizer.md).
 
-### Framework Adapters (v0.2, `pip install ml-memguard[hf]`)
+### Fine-Tuning Adapters (v0.2, `pip install ml-memguard[hf]`)
 
 #### `guard_trainer(trainer, guard=None, **preflight_overrides) -> SafeConfig`
 Attach memory-guard to a HuggingFace `Trainer` in one call.  Introspects the
@@ -359,47 +479,7 @@ called.  Thread `safe.lora_rank`, `safe.lora_layers`, `safe.seq_length` into
 #### `guard_sft_trainer(trainer, guard=None, **preflight_overrides) -> SafeConfig`
 Identical to `guard_trainer` but named for TRL `SFTTrainer` workflows.
 
-### Inference Serving Adapters (v0.3, `pip install ml-memguard[vllm]` / `pip install ml-memguard[sglang]`)
-
-#### `guard_vllm(llm, ...) -> InferenceSafeConfig`
-Accepts a `vllm.LLM`, `vllm.AsyncLLMEngine`, or bare `vllm.LLMEngine`.  Reads
-architecture from `model_config.hf_config`, runs a binary search to find the
-largest `max_num_seqs` that fits in the GPU memory budget.  Returns an
-`InferenceSafeConfig`; the unstarted `KVCacheMonitor` is on `safe.monitor`.
-See [`docs/adapters.md`](docs/adapters.md).
-
-```python
-from memory_guard import guard_vllm
-
-safe = guard_vllm(llm)
-safe.monitor.on_shed_load = lambda u: load_balancer.reduce_weight("primary", 0)
-
-# Start vLLM with safe params:
-#   vllm ... --max-num-seqs {safe.max_num_seqs} --gpu-memory-utilization {safe.gpu_memory_utilization}
-
-with safe.monitor.session():
-    server.serve_forever()
-```
-
-#### `guard_sglang(engine, ...) -> InferenceSafeConfig`
-Accepts `sglang.Runtime` or a bare engine.  Reads `server_args.context_length`
-and `server_args.max_running_requests`.  Polls `token_to_kv_pool` (preferred)
-or `scheduler.get_stats()` (fallback).  Rolling-max smoothing suppresses
-false-recovery signals from RadixAttention prefix-cache evictions.
-
-```python
-from memory_guard import guard_sglang
-
-safe = guard_sglang(runtime)
-safe.monitor.on_shed_load = lambda u: nginx.upstream_weight("primary", 0)
-
-with safe.monitor.session():
-    runtime.wait()
-```
-
-**Design constraint** (ADR 003): both adapters emit signals only — they never
-mutate a running engine.  Load-shedding requires a load balancer or health
-endpoint in front of the engine.
+**Design constraint** (ADR 003): `guard_vllm` and `guard_sglang` emit signals only — they never mutate a running engine. Load-shedding requires a load balancer or health endpoint in front of the engine. See [`docs/adapters.md`](docs/adapters.md) for the full reference.
 
 ## Estimation Accuracy
 
