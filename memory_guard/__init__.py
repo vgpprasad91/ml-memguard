@@ -22,7 +22,7 @@ Quick start:
             train_step(batch_size=mon.current_batch_size)
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 # ---------------------------------------------------------------------------
 # Lazy imports — HF/Unsloth adapters are only resolved on first attribute

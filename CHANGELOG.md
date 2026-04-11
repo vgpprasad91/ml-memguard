@@ -1,5 +1,97 @@
 # Changelog
 
+## [0.4.0] - 2026-04-10
+
+### Added — RL Contextual Bandit Optimizer
+
+- **`memory_guard.bandit_state`** — pure data layer for the RL policy.
+  - `DeviceFingerprint`: bucketed available memory (5 tiers: sub-8 GB to 80+ GB) ×
+    backend × platform.  Two sessions on the same machine with similar free memory
+    hash to the same fingerprint so the Q-table generalises across sessions.
+  - `ModelFingerprint`: bucketed parameter count (5 classes: sub-1B to 35+B) ×
+    normalised quantisation bits (snapped to 4/8/16/32).
+  - `ConfigAction`: frozen, hashable discrete action — `(batch_size, lora_rank,
+    seq_length, max_num_seqs)`.  `max_num_seqs=0` signals training-only configs.
+  - `StateKey`: `NamedTuple(DeviceFingerprint, ModelFingerprint)` — the Q-table
+    row key.
+  - Bucket boundary constants exposed at module level: `MEMORY_TIER_BOUNDARIES_MB`,
+    `PARAM_CLASS_BOUNDARIES`, `MEMORY_TIER_LABELS`, `PARAM_CLASS_LABELS`.
+  - `StateKey.from_values(available_mb, backend, model_params, model_bits)` and
+    equivalent `from_values` classmethods on both fingerprint types.
+
+- **`memory_guard.reward`** — reward signal for the bandit.
+  - `RewardSignal(outcome, efficiency_bonus, combined)`: frozen dataclass with an
+    `is_oom` property.
+  - `compute_reward(estimated_mb, actual_peak_mb, budget_mb, oom_occurred, ...)`:
+    `outcome` = ±1; `efficiency_bonus` = `clamp(1 − |est − act| / budget, 0, 1)`;
+    `combined` = `0.6 × outcome + 0.4 × efficiency_bonus` (range [-0.6, 1.0]).
+  - `RewardSignal` and `compute_reward` re-exported from `memory_guard` top level.
+
+- **`memory_guard.bandit.BanditPolicy`** — epsilon-greedy tabular Q-learner.
+  - `select_action(state_key, candidates, epsilon=None) → Optional[ConfigAction]`:
+    returns `None` on cold start (state unseen) or on the exploration branch,
+    prompting the caller to fall back to binary search.  Never raises.
+  - `update(state_key, action, reward, alpha=None)`: applies
+    `Q[s][a] += alpha × (reward − Q[s][a])` then decays epsilon:
+    `epsilon = max(epsilon_floor, epsilon × epsilon_decay)`.
+  - `q_value(state_key, action) → float`: returns the current Q-value (0.0 for
+    unseen state/action pairs).
+  - `save(path=None)`: atomic JSON write (tempfile + `os.replace`, chmod 0o600).
+    Defaults to `~/.memory-guard/rl_policy.json`.  Fails silently with a warning
+    so a save error never crashes a training run.
+  - `BanditPolicy.load(path=None) → BanditPolicy`: deserialises from disk;
+    returns a fresh cold-start policy on absent, unreadable, or corrupt files.
+    Never raises.
+  - Serialisation: `StateKey` → `"tier|backend|os|param_class|bits"`;
+    `ConfigAction` → `"batch_size|lora_rank|seq_length|max_num_seqs"` —
+    human-readable JSON object keys.
+  - Policy format version `"0.4.0"` stored in the file for forward compatibility.
+
+- **`MemoryGuard` integration** — bandit wired into the existing API.
+  - `MemoryGuard.__init__` and `.auto()` gain `enable_bandit: bool = True`.
+    On construction the policy is loaded from disk (cold-start safe; no file
+    required).  Set `enable_bandit=False` to reproduce exact v0.3 behaviour.
+  - `preflight()`: builds `StateKey`, generates `(batch_size, lora_rank)`
+    candidate grid, calls `policy.select_action()` first.  If the policy
+    returns an action it is validated by the formula-based estimator (safety net
+    preserved); if it fits the budget the `SafeConfig` is returned immediately,
+    skipping the binary-search downgrade.  On cold start or exploration the v0.3
+    binary-search path runs unchanged.  `_last_action` and `_last_state_key`
+    are always recorded for subsequent `record_result()` calls.
+  - `preflight_inference()`: same pattern for `max_num_seqs` — the bandit picks
+    from `_BANDIT_NUM_SEQS = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024)`.
+  - `record_result()` gains `oom_occurred: bool = False` and
+    `policy_update: bool = True` parameters.  It now returns the `RewardSignal`
+    from `record_training_result` and calls `policy.update(state_key, action,
+    reward.combined)` then `policy.save()` when conditions are met.
+
+### Changed
+
+- **`record_training_result()`** (in `memory_guard.calibration`): now returns
+  `RewardSignal` instead of `None`.  Existing callers that discard the return
+  value are unaffected.  Two new keyword parameters: `budget_mb: float = 0.0`
+  and `oom_occurred: bool = False`.
+
+### Added — Documentation
+
+- **`docs/decisions/004-rl-contextual-bandit.md`** (ADR 004): records why
+  contextual bandit was chosen over full sequential RL, why tabular Q-learning
+  over a neural policy, why per-device isolation over cross-device
+  generalisation, and why epsilon has a permanent floor.
+- **`docs/rl_optimizer.md`**: user-facing reference guide — state/action/reward
+  in plain terms, cold-start guarantee, inspecting and resetting the Q-table,
+  full training workflow, and parameters reference.
+
+### Tests
+
+- 63 tests for `bandit_state` (state/action encoding, bucketing, fingerprints)
+- 26 tests for `reward` (RewardSignal, compute_reward, record_training_result)
+- 37 tests for `bandit` (Q-formula, epsilon decay, persistence round-trips)
+- 37 integration tests for MemoryGuard+bandit (`test_bandit_integration.py`)
+- Total: **488 tests passing** (0 regressions from v0.3)
+
+---
+
 ## [0.3.0] - 2026-04-10
 
 ### Added — Inference Memory Monitoring

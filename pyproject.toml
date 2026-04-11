@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ml-memguard"
-version = "0.3.0"
+version = "0.4.0"
 description = "Cross-platform memory guard for ML training and inference serving. Prevents OOM crashes on Apple Silicon, CUDA, and CPU by proactive estimation and runtime monitoring."
 readme = "README.md"
 license = "Apache-2.0"
