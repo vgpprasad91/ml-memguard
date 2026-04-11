@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
+    from .bandit import BanditPolicy
+    from .bandit_state import ConfigAction, StateKey
     from .inference_monitor import KVCacheMonitor
 
 from .downgrade import DowngradeResult, auto_downgrade
@@ -25,6 +27,19 @@ from .monitor import RuntimeMonitor
 from .platforms import Backend, PlatformInfo, detect_platform, get_available_memory_mb
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Candidate grids for the RL bandit
+# ---------------------------------------------------------------------------
+
+#: Batch sizes offered to the bandit as candidates in preflight().
+_BANDIT_BATCH_SIZES: tuple[int, ...] = (1, 2, 4, 8, 16, 32)
+
+#: LoRA ranks offered to the bandit as candidates in preflight().
+_BANDIT_LORA_RANKS: tuple[int, ...] = (0, 4, 8, 16, 32, 64)
+
+#: Concurrent sequence counts offered to the bandit in preflight_inference().
+_BANDIT_NUM_SEQS: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024)
 
 
 @dataclass
@@ -136,6 +151,7 @@ class MemoryGuard:
         platform_info: Optional[PlatformInfo] = None,
         safety_ratio: float = 0.80,  # See constants.SAFETY_RATIO_DEFAULT
         enable_calibration: bool = True,
+        enable_bandit: bool = True,
     ):
         """
         Args:
@@ -146,10 +162,16 @@ class MemoryGuard:
                          0.70 = conservative, for shared machines.
             enable_calibration: If True, apply learned correction factors
                               from past training runs to improve accuracy.
+            enable_bandit: If True, load the RL bandit policy from disk and
+                          use it to propose configs in preflight().  Falls back
+                          to the existing binary-search path on cold start or
+                          exploration.  Disable to reproduce v0.3 behaviour
+                          exactly.
         """
         self.platform = platform_info or detect_platform()
         self.safety_ratio = safety_ratio
         self.enable_calibration = enable_calibration
+        self.enable_bandit = enable_bandit
 
         self._calibration_store = None
         if enable_calibration:
@@ -157,11 +179,27 @@ class MemoryGuard:
             self._calibration_store = CalibrationStore()
 
         self._last_estimate_mb: Optional[float] = None  # For post-training recording
+        self._policy: Optional[BanditPolicy] = None
+        self._last_action: Optional[ConfigAction] = None
+        self._last_state_key: Optional[StateKey] = None
+
+        if enable_bandit:
+            from .bandit import BanditPolicy as _BP
+            self._policy = _BP.load()
 
     @classmethod
-    def auto(cls, safety_ratio: float = 0.80, enable_calibration: bool = True) -> "MemoryGuard":
+    def auto(
+        cls,
+        safety_ratio: float = 0.80,
+        enable_calibration: bool = True,
+        enable_bandit: bool = True,
+    ) -> "MemoryGuard":
         """Create a MemoryGuard with auto-detected platform."""
-        return cls(safety_ratio=safety_ratio, enable_calibration=enable_calibration)
+        return cls(
+            safety_ratio=safety_ratio,
+            enable_calibration=enable_calibration,
+            enable_bandit=enable_bandit,
+        )
 
     @property
     def available_mb(self) -> float:
@@ -211,6 +249,12 @@ class MemoryGuard:
         If the original config fits, it's returned unchanged.
         If not, parameters are iteratively reduced.
 
+        The RL bandit policy (if loaded) is consulted first.  It may propose
+        a ``(batch_size, lora_rank)`` pair that it has learned works well for
+        the current device/model.  The proposal is validated by the estimator
+        (safety net is preserved) before being accepted.  On cold start or
+        exploration the existing binary-search path runs as before.
+
         flash_attention and lazy_evaluation are auto-detected from
         platform if not explicitly set.
         """
@@ -231,6 +275,83 @@ class MemoryGuard:
             params=model_params, hidden_dim=hidden_dim,
             num_heads=num_heads, num_layers=num_layers, bits=model_bits,
         )
+
+        # ---- RL bandit: consult policy before binary-search ----------------
+        from .bandit_state import ConfigAction, StateKey
+        state_key = StateKey.from_values(
+            available_mb=available,
+            backend=self.platform.backend.value,
+            model_params=model_params,
+            model_bits=model_bits,
+        )
+        self._last_state_key = state_key
+
+        candidates = [
+            ConfigAction(
+                batch_size=bs,
+                lora_rank=lr,
+                seq_length=seq_length,
+                max_num_seqs=0,
+            )
+            for bs in _BANDIT_BATCH_SIZES
+            for lr in _BANDIT_LORA_RANKS
+        ]
+
+        if self._policy is not None:
+            policy_action = self._policy.select_action(state_key, candidates)
+            if policy_action is not None:
+                # Validate the policy's recommendation with the estimator
+                p_train_spec = TrainSpec(
+                    batch_size=policy_action.batch_size,
+                    seq_length=policy_action.seq_length,
+                    lora_rank=policy_action.lora_rank,
+                    lora_layers=lora_layers,
+                    optimizer=optimizer,
+                    grad_checkpoint=grad_checkpoint,
+                    grad_accumulation=grad_accumulation,
+                    flash_attention=flash_attention,
+                    lazy_evaluation=lazy_evaluation,
+                )
+                p_est = estimate_training_memory(model=model_spec, train=p_train_spec)
+                p_eff_mb = p_est.total_mb
+                if self.enable_calibration and self._calibration_store:
+                    from .calibration import apply_calibration
+                    p_corr, _ = apply_calibration(
+                        p_est.total_mb,
+                        backend=self.platform.backend.value,
+                        store=self._calibration_store,
+                    )
+                    p_eff_mb = p_corr
+
+                if p_eff_mb <= budget:
+                    self._last_action = policy_action
+                    self._last_estimate_mb = p_eff_mb
+                    logger.debug(
+                        "[memory-guard] Bandit → batch_size=%d lora_rank=%d "
+                        "(%.0fMB ≤ budget %.0fMB).",
+                        policy_action.batch_size, policy_action.lora_rank,
+                        p_eff_mb, budget,
+                    )
+                    return SafeConfig(
+                        batch_size=policy_action.batch_size,
+                        seq_length=policy_action.seq_length,
+                        lora_rank=policy_action.lora_rank,
+                        lora_layers=lora_layers,
+                        grad_checkpoint=grad_checkpoint,
+                        grad_accumulation=grad_accumulation,
+                        estimate=p_est,
+                        budget_mb=budget,
+                        available_mb=available,
+                        changes=[],
+                        fits=True,
+                    )
+                logger.debug(
+                    "[memory-guard] Bandit action failed validation "
+                    "(%.0fMB > budget %.0fMB). Falling back to binary search.",
+                    p_eff_mb, budget,
+                )
+        # ---- end RL bandit -------------------------------------------------
+
         train_spec = TrainSpec(
             batch_size=batch_size, seq_length=seq_length,
             lora_rank=lora_rank, lora_layers=lora_layers,
@@ -265,6 +386,12 @@ class MemoryGuard:
 
         if effective_mb <= budget:
             # Fits! Return original config.
+            self._last_action = ConfigAction(
+                batch_size=batch_size,
+                lora_rank=lora_rank,
+                seq_length=seq_length,
+                max_num_seqs=0,
+            )
             return SafeConfig(
                 batch_size=batch_size, seq_length=seq_length,
                 lora_rank=lora_rank, lora_layers=lora_layers,
@@ -293,6 +420,12 @@ class MemoryGuard:
             lazy_evaluation=lazy_evaluation,
         )
 
+        self._last_action = ConfigAction(
+            batch_size=result.batch_size,
+            lora_rank=result.lora_rank,
+            seq_length=result.seq_length,
+            max_num_seqs=0,
+        )
         return SafeConfig(
             batch_size=result.batch_size, seq_length=result.seq_length,
             lora_rank=result.lora_rank, lora_layers=result.lora_layers,
@@ -344,6 +477,11 @@ class MemoryGuard:
         the memory budget.  Never mutates a running engine — call this
         before starting vLLM or SGLang to determine safe launch parameters.
 
+        The RL bandit policy (if loaded) is consulted first.  It may propose
+        a ``max_num_seqs`` it has learned is safe for the current device/model.
+        The proposal is validated by the estimator before being accepted.  On
+        cold start or exploration the existing binary-search path runs as before.
+
         The KV cache formula used is the ceiling:
             2 × num_layers × num_kv_heads × head_dim × max_seq_len × max_num_seqs × dtype_bytes
 
@@ -374,10 +512,72 @@ class MemoryGuard:
             dtype_bytes=dtype_bytes, hidden_dim=hidden_dim,
         )
 
+        # ---- RL bandit: consult policy before binary-search ----------------
+        from .bandit_state import ConfigAction, StateKey
+        state_key = StateKey.from_values(
+            available_mb=available,
+            backend=self.platform.backend.value,
+            model_params=model_params,
+            model_bits=model_bits,
+        )
+        self._last_state_key = state_key
+
+        candidates = [
+            ConfigAction(
+                batch_size=1,
+                lora_rank=0,
+                seq_length=max_seq_len,
+                max_num_seqs=n,
+            )
+            for n in _BANDIT_NUM_SEQS
+            if n <= max_num_seqs
+        ]
+
+        if self._policy is not None and candidates:
+            policy_action = self._policy.select_action(state_key, candidates)
+            if policy_action is not None:
+                p_est = estimate_serving_memory(
+                    max_num_seqs=policy_action.max_num_seqs, **_kw
+                )
+                if p_est.fits_in(budget):
+                    gpu_util = (
+                        min(0.95, p_est.total_mb / available)
+                        if available > 0 else 0.90
+                    )
+                    self._last_action = policy_action
+                    self._last_estimate_mb = p_est.total_mb
+                    logger.debug(
+                        "[memory-guard] Bandit → max_num_seqs=%d (%.0fMB ≤ %.0fMB).",
+                        policy_action.max_num_seqs, p_est.total_mb, budget,
+                    )
+                    return InferenceSafeConfig(
+                        max_num_seqs=policy_action.max_num_seqs,
+                        max_seq_len=policy_action.seq_length,
+                        gpu_memory_utilization=round(gpu_util, 4),
+                        estimate=p_est,
+                        budget_mb=budget,
+                        available_mb=available,
+                        fits=True,
+                        changes=[],
+                    )
+                logger.debug(
+                    "[memory-guard] Bandit inference action failed validation "
+                    "(%.0fMB > budget %.0fMB). Falling back to binary search.",
+                    p_est.total_mb, budget,
+                )
+        # ---- end RL bandit -------------------------------------------------
+
         # Fast path — requested config already fits
         est = estimate_serving_memory(max_num_seqs=max_num_seqs, **_kw)
         if est.fits_in(budget):
             gpu_util = min(0.95, est.total_mb / available) if available > 0 else 0.90
+            self._last_action = ConfigAction(
+                batch_size=1,
+                lora_rank=0,
+                seq_length=max_seq_len,
+                max_num_seqs=max_num_seqs,
+            )
+            self._last_estimate_mb = est.total_mb
             return InferenceSafeConfig(
                 max_num_seqs=max_num_seqs, max_seq_len=max_seq_len,
                 gpu_memory_utilization=round(gpu_util, 4),
@@ -421,6 +621,14 @@ class MemoryGuard:
             safe_num_seqs, safe_est.total_mb, safe_num_seqs, gpu_util,
         )
 
+        self._last_action = ConfigAction(
+            batch_size=1,
+            lora_rank=0,
+            seq_length=max_seq_len,
+            max_num_seqs=safe_num_seqs,
+        )
+        self._last_estimate_mb = safe_est.total_mb
+
         return InferenceSafeConfig(
             max_num_seqs=safe_num_seqs, max_seq_len=max_seq_len,
             gpu_memory_utilization=round(gpu_util, 4),
@@ -432,6 +640,8 @@ class MemoryGuard:
         self,
         actual_peak_mb: Optional[float] = None,
         model_name: str = "",
+        oom_occurred: bool = False,
+        policy_update: bool = True,
         **kwargs,
     ):
         """Record actual peak memory after training for auto-calibration.
@@ -442,6 +652,18 @@ class MemoryGuard:
 
         Over time, this builds a calibration dataset that corrects
         the formula's output to match real-world measurements.
+
+        When ``policy_update=True`` (the default) and a bandit policy is
+        loaded, the Q-table is updated with the reward from this run and the
+        policy is saved to disk.  Set ``oom_occurred=True`` when the run
+        ended with an OOM error so the bandit learns to avoid that config.
+
+        Args:
+            actual_peak_mb: Measured peak memory (MB).  Auto-detected if None.
+            model_name:     Human-readable model identifier for logging.
+            oom_occurred:   True if the run ended with an OOM error.
+            policy_update:  Whether to update the bandit Q-table.
+            **kwargs:       Forwarded to record_training_result().
         """
         if not self.enable_calibration or not self._calibration_store:
             return
@@ -468,11 +690,32 @@ class MemoryGuard:
             return
 
         from .calibration import record_training_result
-        record_training_result(
+        reward = record_training_result(
             estimated_mb=self._last_estimate_mb,
             actual_peak_mb=actual_peak_mb,
             model_name=model_name,
             backend=self.platform.backend.value,
             store=self._calibration_store,
+            budget_mb=self.budget_mb,
+            oom_occurred=oom_occurred,
             **kwargs,
         )
+
+        # Update the bandit policy with the outcome of this run
+        if (
+            policy_update
+            and self._policy is not None
+            and self._last_state_key is not None
+            and self._last_action is not None
+        ):
+            self._policy.update(
+                self._last_state_key, self._last_action, reward.combined
+            )
+            self._policy.save()
+            logger.debug(
+                "[memory-guard] Bandit policy updated: reward=%.3f "
+                "(states=%d, updates=%d).",
+                reward.combined,
+                self._policy.num_states,
+                self._policy.num_updates,
+            )
