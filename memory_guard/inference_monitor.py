@@ -34,7 +34,7 @@ import collections
 import logging
 import threading
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 from .constants import (
     KV_CACHE_SHED_LOAD_THRESHOLD,
@@ -46,6 +46,9 @@ logger = logging.getLogger(__name__)
 
 # Default history window — matches RuntimeMonitor
 _HISTORY_SIZE = 60
+
+# Default: upload inference telemetry every 30 s (6 × 5 s poll ticks)
+_DEFAULT_TELEMETRY_INTERVAL = 30.0
 
 
 class KVCacheMonitor:
@@ -84,6 +87,13 @@ class KVCacheMonitor:
         critical_threshold: float = 0.95,
         restart_callback: Optional[Callable[[], None]] = None,
         critical_ticks: int = 3,
+        # --- Inference telemetry parameters (PR 23) ---
+        kv_block_size_mb: float = 0.0,
+        extended_poll_fn: Optional[Callable[[], Dict[str, Any]]] = None,
+        telemetry_upload_interval: float = _DEFAULT_TELEMETRY_INTERVAL,
+        telemetry_model_name: str = "",
+        telemetry_backend: str = "",
+        telemetry_os_platform: str = "",
     ) -> None:
         """
         Args:
@@ -123,6 +133,32 @@ class KVCacheMonitor:
                                 ``restart_callback`` fires (default 3).
                                 Prevents a single transient spike from
                                 triggering an unnecessary restart.
+            kv_block_size_mb:   Size of a single KV cache block in MB.
+                                When non-zero, ``kv_velocity_mbps`` is
+                                reported in true MB/s; otherwise it is
+                                stored as blocks/s.  Obtain from
+                                ``engine.cache_config.block_size`` in
+                                vLLM (default 0 = unknown).
+            extended_poll_fn:   Optional zero-argument callable that
+                                returns a ``dict`` with any subset of the
+                                keys: ``fragmentation_ratio``,
+                                ``eviction_rate``, ``avg_seq_len``,
+                                ``near_miss_count``, ``preemption_count``,
+                                ``weights_mb``, ``kvcache_mb``,
+                                ``activations_mb``, ``cuda_ctx_mb``.
+                                Called on each monitoring tick; missing
+                                keys default to ``0.0``.  Must be
+                                thread-safe.
+            telemetry_upload_interval:
+                                Seconds between cloud telemetry uploads
+                                (default 30 s).  Independent of
+                                ``poll_interval``.
+            telemetry_model_name:
+                                Model identifier stored in the telemetry
+                                row (e.g. ``"meta-llama/Llama-3-8B"``).
+            telemetry_backend:  Backend string (``"cuda"``, ``"metal"`` …).
+            telemetry_os_platform:
+                                OS platform string (``"linux"`` …).
         """
         self.poll_fn = poll_fn
         self.poll_interval = poll_interval
@@ -133,6 +169,18 @@ class KVCacheMonitor:
         self.critical_threshold: float = critical_threshold
         self.restart_callback: Optional[Callable[[], None]] = restart_callback
         self.critical_ticks: int = critical_ticks
+
+        # Inference telemetry state
+        self._kv_block_size_mb: float = max(0.0, kv_block_size_mb)
+        self._extended_poll_fn: Optional[Callable[[], Dict[str, Any]]] = extended_poll_fn
+        self._telemetry_upload_interval: float = max(1.0, telemetry_upload_interval)
+        self._telemetry_model_name: str = telemetry_model_name
+        self._telemetry_backend: str = telemetry_backend
+        self._telemetry_os_platform: str = telemetry_os_platform
+        # Velocity tracking
+        self._prev_used_blocks: Optional[int] = None
+        self._prev_poll_time: float = 0.0
+        self._last_telemetry_upload: float = 0.0
 
         self._history: collections.deque[float] = collections.deque(maxlen=history_size)
         self._lock = threading.Lock()
@@ -183,6 +231,9 @@ class KVCacheMonitor:
             self._last_warning_time = 0.0
             self._last_shed_load_time = 0.0
             self._critical_consecutive = 0
+        self._prev_used_blocks = None
+        self._prev_poll_time = 0.0
+        self._last_telemetry_upload = 0.0
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._loop, daemon=True, name="kv-cache-monitor"
@@ -223,10 +274,14 @@ class KVCacheMonitor:
                 self._stop.wait(self.poll_interval)
                 continue
 
+            now = time.time()
+
+            # --- velocity (delta used-blocks / elapsed seconds → MB/s) --
+            kv_velocity = self._compute_velocity(used, now)
+
             # --- record -------------------------------------------------
             with self._lock:
                 self._history.append(utilization)
-                now = time.time()
                 warn_ready = (now - self._last_warning_time) >= self.cooldown_seconds
                 shed_ready = (now - self._last_shed_load_time) >= self.cooldown_seconds
 
@@ -265,11 +320,72 @@ class KVCacheMonitor:
                 )
                 self._fire(self.on_warning, utilization, "on_warning")
 
+            # --- inference telemetry upload (every N seconds) -----------
+            if (now - self._last_telemetry_upload) >= self._telemetry_upload_interval:
+                self._upload_inference_telemetry(kv_velocity)
+                self._last_telemetry_upload = now
+
             self._stop.wait(self.poll_interval)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _compute_velocity(self, used_blocks: int, now: float) -> float:
+        """Return KV cache growth rate.
+
+        Returns MB/s when ``kv_block_size_mb`` is set; blocks/s otherwise.
+        Resets tracking state on the first call after ``start()`` (returns 0).
+        """
+        velocity = 0.0
+        if self._prev_used_blocks is not None and now > self._prev_poll_time:
+            elapsed = now - self._prev_poll_time
+            delta_blocks = used_blocks - self._prev_used_blocks
+            rate_blocks_per_sec = delta_blocks / elapsed
+            if self._kv_block_size_mb > 0.0:
+                velocity = rate_blocks_per_sec * self._kv_block_size_mb
+            else:
+                velocity = rate_blocks_per_sec
+        self._prev_used_blocks = used_blocks
+        self._prev_poll_time = now
+        return velocity
+
+    def _upload_inference_telemetry(self, kv_velocity: float) -> None:
+        """Collect extended signals and post to cloud.upload_inference_telemetry.
+
+        Silently skips when no API key is configured or any step fails.
+        """
+        try:
+            from . import cloud as _cloud
+            if not _cloud.api_key():
+                return
+            from .telemetry import InferenceTelemetry
+
+            extra: Dict[str, Any] = {}
+            if self._extended_poll_fn is not None:
+                try:
+                    extra = self._extended_poll_fn() or {}
+                except Exception as exc:
+                    logger.debug("KVCacheMonitor extended_poll_fn raised: %s", exc)
+
+            signals = InferenceTelemetry(
+                kv_velocity_mbps    = kv_velocity,
+                fragmentation_ratio = float(extra.get("fragmentation_ratio", 0.0)),
+                eviction_rate       = float(extra.get("eviction_rate", 0.0)),
+                avg_seq_len         = float(extra.get("avg_seq_len", 0.0)),
+                near_miss_count     = int(extra.get("near_miss_count", 0)),
+                preemption_count    = int(extra.get("preemption_count", 0)),
+                weights_mb          = float(extra.get("weights_mb", 0.0)),
+                kvcache_mb          = float(extra.get("kvcache_mb", 0.0)),
+                activations_mb      = float(extra.get("activations_mb", 0.0)),
+                cuda_ctx_mb         = float(extra.get("cuda_ctx_mb", 0.0)),
+                model_name          = self._telemetry_model_name,
+                backend             = self._telemetry_backend,
+                os_platform         = self._telemetry_os_platform,
+            )
+            _cloud.upload_inference_telemetry(signals)
+        except Exception as exc:
+            logger.debug("KVCacheMonitor telemetry upload raised: %s", exc)
 
     def _emit_log(self, msg: str) -> None:
         try:

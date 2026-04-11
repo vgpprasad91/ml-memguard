@@ -187,6 +187,48 @@ def record_telemetry(
         return False
 
 
+def upload_inference_telemetry(
+    signals: "InferenceTelemetry",
+    key: Optional[str] = None,
+) -> bool:
+    """Upload a single inference-monitoring cycle to the cloud telemetry store.
+
+    Complements :func:`record_telemetry` (training runs) with the seven
+    inference-specific signals that are invisible to vLLM/SGLang's own
+    Prometheus endpoints.  Called automatically from
+    ``KVCacheMonitor._loop`` when ``MEMGUARD_API_KEY`` is set.
+
+    Args:
+        signals: Populated :class:`~memory_guard.telemetry.InferenceTelemetry`.
+        key:     API key override; reads ``MEMGUARD_API_KEY`` if None.
+
+    Returns:
+        ``True`` on success, ``False`` on any failure (never raises).
+    """
+    from .telemetry import InferenceTelemetry  # local import avoids circular
+    active_key = key or api_key()
+    if not active_key:
+        return False
+    try:
+        import httpx
+        resp = httpx.post(
+            f"{_api_url()}/v1/telemetry",
+            content=json.dumps(signals.to_dict()),
+            headers=_headers(active_key),
+            timeout=5.0,
+        )
+        resp.raise_for_status()
+        logger.debug(
+            "[memory-guard] Inference telemetry posted (vel=%.3f MB/s, evict=%.2f/s).",
+            signals.kv_velocity_mbps,
+            signals.eviction_rate,
+        )
+        return True
+    except Exception as exc:
+        logger.debug("[memory-guard] Cloud inference telemetry upload failed: %s", exc)
+        return False
+
+
 def get_fleet_summary(key: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Fetch the aggregated fleet waste summary from the cloud.
 
