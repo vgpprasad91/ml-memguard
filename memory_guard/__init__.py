@@ -22,7 +22,7 @@ Quick start:
             train_step(batch_size=mon.current_batch_size)
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 # ---------------------------------------------------------------------------
 # Lazy imports — HF/Unsloth adapters are only resolved on first attribute
@@ -79,7 +79,7 @@ from .bandit_state import (
     ModelFingerprint,
     StateKey,
 )
-from .bandit import BanditPolicy
+from .bandit import BanditPolicy, MIN_UPDATES_FOR_CONFIDENCE
 from .guard import MemoryGuard, SafeConfig, InferenceSafeConfig
 from .cloud import api_key, upload_policy, download_policy, record_telemetry, get_fleet_summary
 from .inference_monitor import KVCacheMonitor
@@ -116,6 +116,7 @@ __all__ = [
     "RewardSignal",
     "compute_reward",
     "BanditPolicy",
+    "MIN_UPDATES_FOR_CONFIDENCE",
     "StateKey",
     "ConfigAction",
     "DeviceFingerprint",

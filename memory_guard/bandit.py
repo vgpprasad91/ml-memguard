@@ -76,6 +76,10 @@ _DEFAULT_EPSILON_DECAY: float = 0.995
 _DEFAULT_EPSILON_FLOOR: float = 0.05
 _DEFAULT_ALPHA: float = 0.1
 
+#: Minimum Q-table updates before ``confidence`` reaches 1.0.
+#: Below this threshold recommendations exist but carry less certainty.
+MIN_UPDATES_FOR_CONFIDENCE: int = 20
+
 
 # ---------------------------------------------------------------------------
 # Serialisation helpers
@@ -242,6 +246,108 @@ class BanditPolicy:
     def num_states(self) -> int:
         """Number of distinct StateKeys seen so far."""
         return len(self._q)
+
+    @property
+    def confidence(self) -> float:
+        """Confidence score for the current policy, in [0.0, 1.0].
+
+        Defined as ``min(num_updates / MIN_UPDATES_FOR_CONFIDENCE, 1.0)``.
+        A value of 1.0 means the policy has accumulated at least
+        ``MIN_UPDATES_FOR_CONFIDENCE`` real training/inference runs and its
+        recommendations are battle-tested.  Values below 0.5 indicate a cold
+        or near-cold start — callers should treat recommendations with caution
+        and prefer binary-search fallback.
+
+        Example::
+
+            policy = BanditPolicy.load()
+            if policy.confidence < 0.5:
+                print("Cold start — not enough data yet")
+        """
+        return min(self.num_updates / MIN_UPDATES_FOR_CONFIDENCE, 1.0)
+
+    # ------------------------------------------------------------------
+    # Recovery-path recommendation API
+    # ------------------------------------------------------------------
+
+    def recommend(self, state_key: StateKey) -> Optional[ConfigAction]:
+        """Return the highest-Q known action for *state_key*, or None.
+
+        Unlike ``select_action``, this method:
+
+        - **Never explores** — epsilon is ignored entirely.
+        - **Requires no candidate list** — it searches all actions recorded
+          for this state in the Q-table.
+        - **Is deterministic** — safe to call from auto-heal watchdogs and
+          recovery paths where random exploration would cause a second crash.
+
+        Typical usage in a recovery loop::
+
+            action = policy.recommend(state_key)
+            if action is None:
+                action = fallback_binary_search(...)  # cold start
+            relaunch_vllm(max_num_seqs=action.max_num_seqs)
+
+        Args:
+            state_key: The (device, model) fingerprint to look up.
+
+        Returns:
+            The ``ConfigAction`` with the highest Q-value for *state_key*,
+            or ``None`` if *state_key* has never been seen by this policy.
+        """
+        row = self._q.get(state_key)
+        if not row:
+            return None
+        return max(row, key=row.__getitem__)
+
+    def recommend_conservative(
+        self,
+        state_key: StateKey,
+        margin: float = 0.15,
+    ) -> Optional[ConfigAction]:
+        """Return a safety-margined config for *state_key*, or None.
+
+        Calls ``recommend()`` to get the best known action, then applies a
+        conservative safety margin by reducing ``batch_size`` and
+        ``max_num_seqs`` by *margin* (default 15%).  ``lora_rank`` and
+        ``seq_length`` are left unchanged — reducing either changes model
+        semantics rather than just memory headroom.
+
+        This is the correct method to call from an auto-heal watchdog.  The
+        config that caused the OOM should not be reused verbatim; a 15%
+        reduction gives the relaunch a meaningful memory buffer without
+        forcing a severe throughput penalty.
+
+        Example::
+
+            action = policy.recommend_conservative(state_key, margin=0.15)
+            # action.batch_size is 15 % smaller than the best known value
+            # action.max_num_seqs is 15 % smaller than the best known value
+
+        Args:
+            state_key: The (device, model) fingerprint to look up.
+            margin:    Fractional reduction applied to ``batch_size`` and
+                       ``max_num_seqs`` (default 0.15 = 15% smaller).
+                       Clamped to the valid floor (≥ 1 for batch_size,
+                       ≥ 0 for max_num_seqs).
+
+        Returns:
+            A new ``ConfigAction`` with safety margins applied, or ``None``
+            if *state_key* has never been seen by this policy.
+        """
+        best = self.recommend(state_key)
+        if best is None:
+            return None
+
+        def _shrink(v: int, floor: int = 1) -> int:
+            return max(floor, int(v * (1.0 - margin)))
+
+        return ConfigAction(
+            batch_size=_shrink(best.batch_size, floor=1),
+            lora_rank=best.lora_rank,
+            seq_length=best.seq_length,
+            max_num_seqs=_shrink(best.max_num_seqs, floor=0),
+        )
 
     # ------------------------------------------------------------------
     # Core API
