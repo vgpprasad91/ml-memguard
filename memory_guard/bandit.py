@@ -145,6 +145,12 @@ def _merge_cloud_policy(policy: "BanditPolicy") -> None:
         if not cloud_data or "q_table" not in cloud_data:
             return
 
+        fleet_contributors: int = int(cloud_data.get("fleet_contributors", 0))
+        if fleet_contributors == 0:
+            logger.debug(
+                "[memory-guard] Fleet cold start — you are the first contributor."
+            )
+
         cloud_updates: int = int(cloud_data.get("num_updates", 0))
         local_updates: int = policy.num_updates
         total: int = cloud_updates + local_updates
@@ -175,8 +181,10 @@ def _merge_cloud_policy(policy: "BanditPolicy") -> None:
                     policy._q[sk][action] = w_local * local_q + w_cloud * cloud_q
 
         logger.debug(
-            "[memory-guard] Merged cloud policy: %d states now loaded.",
+            "[memory-guard] Merged cloud policy: %d states now loaded (%d fleet contributor%s).",
             policy.num_states,
+            fleet_contributors,
+            "s" if fleet_contributors != 1 else "",
         )
     except Exception as exc:
         logger.debug("[memory-guard] Cloud policy merge skipped: %s", exc)

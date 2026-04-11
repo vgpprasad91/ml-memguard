@@ -123,11 +123,20 @@ def download_policy(key: Optional[str] = None) -> Optional[Dict[str, Any]]:
             return None
         resp.raise_for_status()
         data = resp.json()
+        contributors = int(data.get("fleet_contributors", 0))
         logger.debug(
-            "[memory-guard] Downloaded cloud policy (%d states, %d updates).",
+            "[memory-guard] Downloaded cloud policy (%d states, %d updates, %d fleet contributor%s).",
             len(data.get("q_table", {})),
             data.get("num_updates", 0),
+            contributors,
+            "s" if contributors != 1 else "",
         )
+        if contributors > 1:
+            logger.info(
+                "[memory-guard] Fleet policy active: %d contributors, last rebuilt %s.",
+                contributors,
+                data.get("fleet_last_rebuilt") or "unknown",
+            )
         return data
     except Exception as exc:
         logger.debug("[memory-guard] Cloud policy download failed (local only): %s", exc)
