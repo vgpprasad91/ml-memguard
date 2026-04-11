@@ -181,6 +181,11 @@ class KVCacheMonitor:
         self._prev_used_blocks: Optional[int] = None
         self._prev_poll_time: float = 0.0
         self._last_telemetry_upload: float = 0.0
+        # Predictive OOM state (PR 24)
+        # Separate cooldown so predictive restart doesn't loop tightly.
+        self._last_predictive_restart: float = 0.0
+        _PREDICTIVE_RESTART_COOLDOWN = 120.0   # module-level constant for tests
+        self._predictive_restart_cooldown: float = _PREDICTIVE_RESTART_COOLDOWN
 
         self._history: collections.deque[float] = collections.deque(maxlen=history_size)
         self._lock = threading.Lock()
@@ -234,6 +239,7 @@ class KVCacheMonitor:
         self._prev_used_blocks = None
         self._prev_poll_time = 0.0
         self._last_telemetry_upload = 0.0
+        self._last_predictive_restart = 0.0
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._loop, daemon=True, name="kv-cache-monitor"
@@ -285,6 +291,12 @@ class KVCacheMonitor:
                 warn_ready = (now - self._last_warning_time) >= self.cooldown_seconds
                 shed_ready = (now - self._last_shed_load_time) >= self.cooldown_seconds
 
+            # --- predictive OOM check (PR 24) — runs before reactive checks
+            # so that when the predictive path fires on_shed_load it updates
+            # _last_shed_load_time and the reactive path won't double-fire
+            # within the cooldown window.
+            self._run_predict_oom(kv_velocity, utilization, shed_ready)
+
             # --- critical threshold (consecutive tick counting) ----------
             if utilization >= self.critical_threshold:
                 self._critical_consecutive += 1
@@ -330,6 +342,80 @@ class KVCacheMonitor:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _run_predict_oom(
+        self,
+        kv_velocity: float,
+        utilization: float,
+        shed_ready: bool,
+    ) -> None:
+        """Call POST /v1/predict and fire on_shed_load or restart_callback.
+
+        Falls back silently to existing rule-based thresholds when the cloud
+        API is unavailable (predict_oom returns None).
+
+        Probability → action mapping (mirrors the Worker):
+          p > 0.92 → planned restart (if restart_callback set, with 120 s cooldown)
+          p > 0.70 → on_shed_load  (respects the normal per-level cooldown)
+          p ≤ 0.70 → no action (let reactive thresholds decide)
+        """
+        try:
+            from . import cloud as _cloud
+            if not _cloud.api_key():
+                return
+
+            extra: Dict[str, Any] = {}
+            if self._extended_poll_fn is not None:
+                try:
+                    extra = self._extended_poll_fn() or {}
+                except Exception as exc:
+                    logger.debug("extended_poll_fn raised in predict: %s", exc)
+
+            signals: Dict[str, Any] = {
+                "kv_velocity_mbps":    kv_velocity,
+                "fragmentation_ratio": float(extra.get("fragmentation_ratio", 0.0)),
+                "eviction_rate":       float(extra.get("eviction_rate", 0.0)),
+                "avg_seq_len":         float(extra.get("avg_seq_len", 0.0)),
+                "near_miss_count":     int(extra.get("near_miss_count", 0)),
+                "preemption_count":    int(extra.get("preemption_count", 0)),
+                "weights_mb":          float(extra.get("weights_mb", 0.0)),
+                "kvcache_mb":          float(extra.get("kvcache_mb", 0.0)),
+            }
+
+            result = _cloud.predict_oom(
+                signals,
+                model_name=self._telemetry_model_name,
+                backend=self._telemetry_backend,
+            )
+
+            if result is None:
+                # Cloud unavailable — fall through to reactive thresholds (no-op here)
+                return
+
+            p      = float(result.get("oom_probability", 0.0))
+            horizon = result.get("horizon_seconds", "?")
+
+            if p > 0.92 and self.restart_callback is not None:
+                now = time.time()
+                if (now - self._last_predictive_restart) >= self._predictive_restart_cooldown:
+                    self._emit_log(
+                        f"[memory-guard] Predictive OOM p={p:.2f} ≥ 0.92 → "
+                        f"planned restart (horizon ≈ {horizon}s)"
+                    )
+                    self._last_predictive_restart = now
+                    self._fire_restart()
+
+            elif p > 0.70 and shed_ready:
+                with self._lock:
+                    self._last_shed_load_time = time.time()
+                self._emit_log(
+                    f"[memory-guard] Predictive OOM p={p:.2f} > 0.70 → "
+                    f"shed_load (horizon ≈ {horizon}s)"
+                )
+                self._fire(self.on_shed_load, utilization, "on_shed_load (predictive)")
+
+        except Exception as exc:
+            logger.debug("[memory-guard] _run_predict_oom raised: %s", exc)
 
     def _compute_velocity(self, used_blocks: int, now: float) -> float:
         """Return KV cache growth rate.

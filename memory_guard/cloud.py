@@ -187,6 +187,54 @@ def record_telemetry(
         return False
 
 
+def predict_oom(
+    signals: Dict[str, Any],
+    key: Optional[str] = None,
+    model_name: str = "",
+    backend: str = "",
+) -> Optional[Dict[str, Any]]:
+    """Call ``POST /v1/predict`` and return the OOM prediction, or ``None``.
+
+    The call is made with a **50 ms timeout** so a slow or unreachable cloud
+    API never delays a monitoring tick.  On any failure (timeout, network
+    error, non-2xx response) the function returns ``None`` and the caller
+    falls through to local rule-based thresholds unchanged.
+
+    Args:
+        signals:    Dict with any subset of the inference signal keys:
+                    ``kv_velocity_mbps``, ``fragmentation_ratio``,
+                    ``eviction_rate``, ``avg_seq_len``, ``near_miss_count``,
+                    ``preemption_count``, ``weights_mb``, ``kvcache_mb``.
+                    Missing keys default to ``0`` server-side.
+        key:        API key override; reads ``MEMGUARD_API_KEY`` if None.
+        model_name: Serving model identifier for D1 personalization.
+        backend:    Backend string for D1 personalization.
+
+    Returns:
+        Dict with keys ``oom_probability`` (float 0–1), ``action``
+        (``"none"`` | ``"shed_load"`` | ``"restart"``),
+        ``horizon_seconds`` (int), ``confidence`` (float 0–1),
+        or ``None`` on any failure.
+    """
+    active_key = key or api_key()
+    if not active_key:
+        return None
+    try:
+        import httpx
+        payload = {**signals, "model_name": model_name, "backend": backend}
+        resp = httpx.post(
+            f"{_api_url()}/v1/predict",
+            content=json.dumps(payload),
+            headers=_headers(active_key),
+            timeout=0.05,   # 50 ms — must not block a monitoring tick
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        logger.debug("[memory-guard] predict_oom failed (using local rules): %s", exc)
+        return None
+
+
 def upload_inference_telemetry(
     signals: "InferenceTelemetry",
     key: Optional[str] = None,
