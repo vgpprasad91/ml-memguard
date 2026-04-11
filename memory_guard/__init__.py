@@ -85,6 +85,7 @@ from .cloud import api_key, upload_policy, download_policy, record_telemetry, ge
 from .inference_monitor import KVCacheMonitor
 from .monitor import RuntimeMonitor
 from .cuda_recovery import CUDAOOMRecovery
+from .watchdog import VLLMWatchdog, guard_vllm_watchdog
 from .downgrade import auto_downgrade, DowngradeResult
 
 __all__ = [
@@ -111,6 +112,8 @@ __all__ = [
     "RuntimeMonitor",
     "KVCacheMonitor",
     "CUDAOOMRecovery",
+    "VLLMWatchdog",
+    "guard_vllm_watchdog",
     "CalibrationStore",
     "record_training_result",
     "RewardSignal",
