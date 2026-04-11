@@ -8,6 +8,8 @@ No more `gpu_memory_utilization` trial-and-error. No more KV cache crashes at 3 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/pypi/pyversions/ml-memguard.svg)](https://pypi.org/project/ml-memguard/)
 
+**→ [How much is your team wasting on OOM crashes? Find your number.](https://memguard-calculator.pages.dev)**
+
 ```bash
 pip install ml-memguard                  # core (zero dependencies)
 pip install ml-memguard[hf]             # + HuggingFace Transformers adapter
