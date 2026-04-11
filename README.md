@@ -1,8 +1,8 @@
 # memory-guard
 
-**Cross-platform memory guard for ML training and inference serving. Prevents OOM crashes on Apple Silicon, CUDA, and CPU.**
+**Cross-platform memory guard for ML training and inference serving. Prevents OOM crashes on Apple Silicon, CUDA, and CPU. Learns optimal configs from experience.**
 
-No more frozen Macs. No more `CUDA out of memory`. Just training that works.
+No more frozen Macs. No more `CUDA out of memory`. Just training that works — and gets smarter every run.
 
 [![PyPI version](https://img.shields.io/pypi/v/ml-memguard.svg)](https://pypi.org/project/ml-memguard/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
@@ -69,6 +69,7 @@ with guard.monitor(safe.batch_size) as mon:
 |---------|:---:|:---:|:---:|:---:|
 | Proactive memory estimation | Yes | Yes | Yes | Yes |
 | Auto-downgrade config | Yes | Yes | Yes | Yes |
+| RL optimizer (learns per device) | Yes | Yes | Yes | Yes |
 | Runtime pressure monitoring | Yes (Mach kernel + MLX Metal) | Yes (torch.cuda) | Yes (PSI, cgroups) | Yes (kernel32) |
 | MLX Metal ground-truth | Yes (mx.metal.get_active_memory) | N/A | N/A | N/A |
 | OOM catch & retry | N/A (no OOM on Metal) | Yes | N/A | N/A |
@@ -116,6 +117,26 @@ When pressure exceeds 85%, batch size is halved mid-training.
 ### 4. Auto-Calibration
 
 After each training run, the actual peak memory (from `mx.metal.get_peak_memory()` or `torch.cuda.max_memory_allocated()`) is recorded alongside the formula estimate. After 3+ runs, a median correction factor is applied to future estimates, narrowing the gap between predicted and actual memory usage over time.
+
+### 5. RL Optimizer (v0.4)
+
+A contextual bandit that learns which `(batch_size, lora_rank)` combination works best on your specific device and model. On cold start it falls back to the binary-search path from step 2. After a handful of runs it starts recommending configs it has learned are safe and efficient — and still falls back to binary search on the 5 % exploration floor so novel model architectures always get probed.
+
+```python
+guard = MemoryGuard.auto()   # loads ~/.memory-guard/rl_policy.json on disk
+
+safe = guard.preflight(...)  # bandit recommends once it has learned; binary search until then
+
+# ... training loop ...
+
+guard.record_result(
+    actual_peak_mb=get_peak_memory(),
+    oom_occurred=False,          # set True if training crashed with OOM
+)
+# → updates the Q-table and saves the policy file atomically
+```
+
+The policy is a plain JSON file — human-readable, editable, and deletable.  See [`docs/rl_optimizer.md`](docs/rl_optimizer.md) for the full reference and [`docs/decisions/004-rl-contextual-bandit.md`](docs/decisions/004-rl-contextual-bandit.md) for the design rationale.
 
 ## Framework Integration
 
@@ -229,6 +250,7 @@ trainer.train()
 
 *New in v0.2.0* — adapters read the model's architecture automatically so you
 don't have to look up `hidden_size`, `num_heads`, or `num_layers`.
+Inference serving adapters added in v0.3.0; RL optimizer integrated in v0.4.0.
 Full reference: [`docs/adapters.md`](docs/adapters.md).
 
 ### How model introspection works
@@ -293,6 +315,28 @@ Standalone downgrade function.
 ### `CUDAOOMRecovery(initial_batch_size)`
 CUDA-specific OOM catch-and-retry wrapper.
 
+### RL Optimizer (v0.4)
+
+#### `guard.record_result(actual_peak_mb=None, oom_occurred=False, policy_update=True, model_name="")`
+Call after each training run to update the calibration store and the RL
+policy.  `actual_peak_mb` is auto-detected from MLX/CUDA if not supplied.
+Set `oom_occurred=True` if the run ended with OOM — the policy learns a
+negative reward and avoids that config in future.
+
+#### `BanditPolicy.load(path=None) -> BanditPolicy`
+Load the policy from disk (defaults to `~/.memory-guard/rl_policy.json`).
+Returns a fresh cold-start policy silently if the file is absent or corrupt.
+
+#### `BanditPolicy.q_value(state_key, action) -> float`
+Read the current Q-value for a `(StateKey, ConfigAction)` pair (0.0 for
+unseen entries).
+
+#### `StateKey.from_values(available_mb, backend, model_params, model_bits)`
+Convenience constructor for use with `BanditPolicy.q_value()` and
+`BanditPolicy.update()` directly.
+
+Full reference: [`docs/rl_optimizer.md`](docs/rl_optimizer.md).
+
 ### Framework Adapters (v0.2, `pip install ml-memguard[hf]`)
 
 #### `guard_trainer(trainer, guard=None, **preflight_overrides) -> SafeConfig`
@@ -317,39 +361,39 @@ Identical to `guard_trainer` but named for TRL `SFTTrainer` workflows.
 
 ### Inference Serving Adapters (v0.3, `pip install ml-memguard[vllm]` / `pip install ml-memguard[sglang]`)
 
-#### `guard_vllm(llm, ...) -> (InferenceSafeConfig, KVCacheMonitor)`
+#### `guard_vllm(llm, ...) -> InferenceSafeConfig`
 Accepts a `vllm.LLM`, `vllm.AsyncLLMEngine`, or bare `vllm.LLMEngine`.  Reads
 architecture from `model_config.hf_config`, runs a binary search to find the
-largest `max_num_seqs` that fits in the GPU memory budget, and returns an
-unstarted `KVCacheMonitor` wired to the block manager.  See [`docs/adapters.md`](docs/adapters.md).
+largest `max_num_seqs` that fits in the GPU memory budget.  Returns an
+`InferenceSafeConfig`; the unstarted `KVCacheMonitor` is on `safe.monitor`.
+See [`docs/adapters.md`](docs/adapters.md).
 
 ```python
 from memory_guard import guard_vllm
 
-safe, monitor = guard_vllm(
-    llm,
-    on_shed_load=lambda u: load_balancer.reduce_weight("primary", 0),
-)
+safe = guard_vllm(llm)
+safe.monitor.on_shed_load = lambda u: load_balancer.reduce_weight("primary", 0)
+
 # Start vLLM with safe params:
 #   vllm ... --max-num-seqs {safe.max_num_seqs} --gpu-memory-utilization {safe.gpu_memory_utilization}
 
-with monitor.session():
+with safe.monitor.session():
     server.serve_forever()
 ```
 
-#### `guard_sglang(engine, ...) -> (InferenceSafeConfig, KVCacheMonitor)`
+#### `guard_sglang(engine, ...) -> InferenceSafeConfig`
 Accepts `sglang.Runtime` or a bare engine.  Reads `server_args.context_length`
 and `server_args.max_running_requests`.  Polls `token_to_kv_pool` (preferred)
-or `scheduler.get_stats()` (fallback).
+or `scheduler.get_stats()` (fallback).  Rolling-max smoothing suppresses
+false-recovery signals from RadixAttention prefix-cache evictions.
 
 ```python
 from memory_guard import guard_sglang
 
-safe, monitor = guard_sglang(
-    runtime,
-    on_shed_load=lambda u: nginx.upstream_weight("primary", 0),
-)
-with monitor.session():
+safe = guard_sglang(runtime)
+safe.monitor.on_shed_load = lambda u: nginx.upstream_weight("primary", 0)
+
+with safe.monitor.session():
     runtime.wait()
 ```
 
@@ -424,7 +468,7 @@ Then open a [GitHub issue](https://github.com/vgpprasad91/ml-memguard/issues/new
 
 ### Other Contributions
 
-- **Framework adapters**: PyTorch Lightning, Axolotl, LitGPT wrappers (HF Transformers and Unsloth ship in v0.2.0; vLLM and SGLang in v0.3.0)
+- **Framework adapters**: PyTorch Lightning, Axolotl, LitGPT wrappers (HF Transformers and Unsloth ship in v0.2.0; vLLM and SGLang in v0.3.0; RL optimizer in v0.4.0)
 - **Accuracy data**: Real training runs on CUDA or non-Apple hardware — see the table above
 - **Bug reports**: If the estimate was off by >30%, that's a bug — please report it with your config
 

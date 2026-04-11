@@ -73,6 +73,13 @@ from .platforms import (
 )
 from .calibration import CalibrationStore, record_training_result
 from .reward import RewardSignal, compute_reward
+from .bandit_state import (
+    ConfigAction,
+    DeviceFingerprint,
+    ModelFingerprint,
+    StateKey,
+)
+from .bandit import BanditPolicy
 from .guard import MemoryGuard, SafeConfig, InferenceSafeConfig
 from .inference_monitor import KVCacheMonitor
 from .monitor import RuntimeMonitor
@@ -107,6 +114,11 @@ __all__ = [
     "record_training_result",
     "RewardSignal",
     "compute_reward",
+    "BanditPolicy",
+    "StateKey",
+    "ConfigAction",
+    "DeviceFingerprint",
+    "ModelFingerprint",
     "auto_downgrade",
     "DowngradeResult",
     # HuggingFace adapter (lazy — resolved only on access)
