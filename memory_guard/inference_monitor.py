@@ -81,28 +81,48 @@ class KVCacheMonitor:
         on_log: Optional[Callable[[str], None]] = None,
         cooldown_seconds: float = 30.0,
         history_size: int = _HISTORY_SIZE,
+        critical_threshold: float = 0.95,
+        restart_callback: Optional[Callable[[], None]] = None,
+        critical_ticks: int = 3,
     ) -> None:
         """
         Args:
-            poll_fn:          Zero-argument callable returning
-                              ``(used_blocks, total_blocks)``.  Called from
-                              the background thread — must be thread-safe.
-            poll_interval:    Seconds between polls (default 5 s).
-            on_warning:       ``Callable[[float], None]`` fired when
-                              utilization ≥ THRESHOLD_WARNING (80 %).
-                              Receives the utilization value (0.0–1.0).
-                              Called at most once per ``cooldown_seconds``.
-            on_shed_load:     ``Callable[[float], None]`` fired when
-                              utilization ≥ THRESHOLD_SHED_LOAD (92 %).
-                              Receives the utilization value (0.0–1.0).
-                              Called at most once per ``cooldown_seconds``.
-                              Takes priority over ``on_warning`` at 92 %+.
-            on_log:           Callback for human-readable log messages
-                              (default: ``logger.warning``).
-            cooldown_seconds: Minimum seconds between consecutive firings
-                              of the same callback level.
-            history_size:     Maximum number of utilization readings to
-                              retain in ``utilization_history`` (default 60).
+            poll_fn:            Zero-argument callable returning
+                                ``(used_blocks, total_blocks)``.  Called from
+                                the background thread — must be thread-safe.
+            poll_interval:      Seconds between polls (default 5 s).
+            on_warning:         ``Callable[[float], None]`` fired when
+                                utilization ≥ THRESHOLD_WARNING (80 %).
+                                Receives the utilization value (0.0–1.0).
+                                Called at most once per ``cooldown_seconds``.
+            on_shed_load:       ``Callable[[float], None]`` fired when
+                                utilization ≥ THRESHOLD_SHED_LOAD (92 %).
+                                Receives the utilization value (0.0–1.0).
+                                Called at most once per ``cooldown_seconds``.
+                                Takes priority over ``on_warning`` at 92 %+.
+            on_log:             Callback for human-readable log messages
+                                (default: ``logger.warning``).
+            cooldown_seconds:   Minimum seconds between consecutive firings
+                                of the same callback level.
+            history_size:       Maximum number of utilization readings to
+                                retain in ``utilization_history`` (default 60).
+            critical_threshold: KV cache usage fraction above which a planned
+                                graceful restart is triggered (default 0.95).
+                                When utilization stays at or above this level
+                                for ``critical_ticks`` consecutive poll ticks,
+                                ``restart_callback`` is invoked and the
+                                consecutive counter resets.
+            restart_callback:   Zero-argument callable invoked when utilization
+                                exceeds ``critical_threshold`` for
+                                ``critical_ticks`` consecutive ticks.  The
+                                caller wires this to the process supervisor
+                                (e.g. ``VLLMWatchdog.stop`` + relaunch).
+                                ``None`` disables the planned-restart feature.
+            critical_ticks:     Number of consecutive poll ticks above
+                                ``critical_threshold`` required before
+                                ``restart_callback`` fires (default 3).
+                                Prevents a single transient spike from
+                                triggering an unnecessary restart.
         """
         self.poll_fn = poll_fn
         self.poll_interval = poll_interval
@@ -110,6 +130,9 @@ class KVCacheMonitor:
         self.on_shed_load = on_shed_load
         self.on_log = on_log or (lambda msg: logger.warning(msg))
         self.cooldown_seconds = cooldown_seconds
+        self.critical_threshold: float = critical_threshold
+        self.restart_callback: Optional[Callable[[], None]] = restart_callback
+        self.critical_ticks: int = critical_ticks
 
         self._history: collections.deque[float] = collections.deque(maxlen=history_size)
         self._lock = threading.Lock()
@@ -117,6 +140,7 @@ class KVCacheMonitor:
         self._thread: Optional[threading.Thread] = None
         self._last_warning_time: float = 0.0
         self._last_shed_load_time: float = 0.0
+        self._critical_consecutive: int = 0
 
     # ------------------------------------------------------------------
     # Public properties
@@ -158,6 +182,7 @@ class KVCacheMonitor:
             self._history.clear()
             self._last_warning_time = 0.0
             self._last_shed_load_time = 0.0
+            self._critical_consecutive = 0
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._loop, daemon=True, name="kv-cache-monitor"
@@ -205,6 +230,22 @@ class KVCacheMonitor:
                 warn_ready = (now - self._last_warning_time) >= self.cooldown_seconds
                 shed_ready = (now - self._last_shed_load_time) >= self.cooldown_seconds
 
+            # --- critical threshold (consecutive tick counting) ----------
+            if utilization >= self.critical_threshold:
+                self._critical_consecutive += 1
+                if (self._critical_consecutive >= self.critical_ticks
+                        and self.restart_callback is not None):
+                    self._emit_log(
+                        f"[memory-guard] KV cache critical: {utilization:.1%} \u2265 "
+                        f"{self.critical_threshold:.0%} for "
+                        f"{self._critical_consecutive} consecutive ticks "
+                        f"\u2014 triggering planned graceful restart"
+                    )
+                    self._fire_restart()
+                    self._critical_consecutive = 0
+            else:
+                self._critical_consecutive = 0
+
             # --- dispatch callbacks (outside lock) ----------------------
             if utilization >= self.THRESHOLD_SHED_LOAD and shed_ready:
                 with self._lock:
@@ -248,6 +289,14 @@ class KVCacheMonitor:
             cb(utilization)
         except Exception:
             logger.debug("KVCacheMonitor %s raised", name, exc_info=True)
+
+    def _fire_restart(self) -> None:
+        if self.restart_callback is None:
+            return
+        try:
+            self.restart_callback()
+        except Exception:
+            logger.debug("KVCacheMonitor restart_callback raised", exc_info=True)
 
 
 class _KVCacheSession:
