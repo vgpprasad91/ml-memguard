@@ -81,6 +81,7 @@ from .bandit_state import (
 )
 from .bandit import BanditPolicy
 from .guard import MemoryGuard, SafeConfig, InferenceSafeConfig
+from .cloud import api_key, upload_policy, download_policy, record_telemetry, get_fleet_summary
 from .inference_monitor import KVCacheMonitor
 from .monitor import RuntimeMonitor
 from .cuda_recovery import CUDAOOMRecovery
@@ -131,4 +132,10 @@ __all__ = [
     "guard_vllm",
     # SGLang adapter (lazy — resolved only on access)
     "guard_sglang",
+    # Cloud sync (pip install ml-memguard[cloud])
+    "api_key",
+    "upload_policy",
+    "download_policy",
+    "record_telemetry",
+    "get_fleet_summary",
 ]
