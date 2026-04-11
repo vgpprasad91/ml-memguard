@@ -247,14 +247,44 @@ def record_training_result(
     lora_rank: int = 0,
     flash_attention: bool = True,
     store: Optional[CalibrationStore] = None,
-):
+    budget_mb: float = 0.0,
+    oom_occurred: bool = False,
+) -> "RewardSignal":
     """Record the result of a training run for future calibration.
 
     Call this after training completes with the formula estimate
     and the actual peak memory (from mx.metal.get_peak_memory()
     or torch.cuda.max_memory_allocated()).
+
+    In addition to updating the ``CalibrationStore`` (existing behaviour),
+    this function now computes and returns a ``RewardSignal`` that the RL
+    bandit policy (v0.4) uses to update its Q-table.  Callers that do not
+    use the RL policy can safely ignore the return value — no breaking change.
+
+    Args:
+        estimated_mb:    Formula-based memory estimate before the run (MB).
+        actual_peak_mb:  Measured peak memory during the run (MB).
+        model_name:      Human-readable model identifier (optional).
+        backend:         Backend string, e.g. ``"cuda"`` (optional).
+        batch_size:      Batch size used during the run (optional).
+        seq_length:      Sequence length used during the run (optional).
+        lora_rank:       LoRA rank used during the run (optional).
+        flash_attention: Whether FlashAttention was active (optional).
+        store:           ``CalibrationStore`` to record into; auto-created
+                         if None.
+        budget_mb:       Memory budget used for the preflight check (MB).
+                         Pass 0.0 if unknown; the efficiency bonus in the
+                         returned ``RewardSignal`` will be 0.0 in that case.
+        oom_occurred:    True if the run ended with an OOM error.
+
+    Returns:
+        ``RewardSignal`` with ``outcome``, ``efficiency_bonus``, and
+        ``combined`` fields.  The ``combined`` field is ready to pass
+        directly to ``BanditPolicy.update()`` as the reward value.
     """
     import time
+
+    from .reward import compute_reward
 
     if store is None:
         store = CalibrationStore()
@@ -271,3 +301,14 @@ def record_training_result(
         timestamp=time.time(),
     )
     store.add_point(point)
+
+    return compute_reward(
+        estimated_mb=estimated_mb,
+        actual_peak_mb=actual_peak_mb,
+        budget_mb=budget_mb,
+        oom_occurred=oom_occurred,
+    )
+
+
+# Re-export for type-checking callers that import RewardSignal via calibration.
+from .reward import RewardSignal  # noqa: E402  (after function definition to avoid circular)

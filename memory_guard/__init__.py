@@ -72,6 +72,7 @@ from .platforms import (
     Backend,
 )
 from .calibration import CalibrationStore, record_training_result
+from .reward import RewardSignal, compute_reward
 from .guard import MemoryGuard, SafeConfig, InferenceSafeConfig
 from .inference_monitor import KVCacheMonitor
 from .monitor import RuntimeMonitor
@@ -104,6 +105,8 @@ __all__ = [
     "CUDAOOMRecovery",
     "CalibrationStore",
     "record_training_result",
+    "RewardSignal",
+    "compute_reward",
     "auto_downgrade",
     "DowngradeResult",
     # HuggingFace adapter (lazy — resolved only on access)
