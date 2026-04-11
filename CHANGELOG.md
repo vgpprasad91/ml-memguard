@@ -1,5 +1,93 @@
 # Changelog
 
+## [0.5.0] - 2026-04-11
+
+### Added — Auto-Heal Recovery API
+
+- **`BanditPolicy.recommend(state_key) → Optional[ConfigAction]`** — deterministic
+  argmax over the Q-table for *state_key*.  Unlike `select_action`, epsilon is
+  ignored entirely and no candidate list is required.  Returns `None` on cold start
+  (state never seen).  Safe to call from auto-heal watchdogs and recovery paths where
+  random exploration would cause a second crash.
+
+- **`BanditPolicy.recommend_conservative(state_key, margin=0.15) → Optional[ConfigAction]`**
+  — calls `recommend()` then applies a 15 % safety margin: `batch_size` and
+  `max_num_seqs` are reduced by *margin* (floored at 1 and 0 respectively);
+  `lora_rank` and `seq_length` are left unchanged (reducing either changes model
+  semantics, not just memory headroom).  Returns `None` on cold start.  This is the
+  correct method to call from an OOM recovery loop.
+
+- **`BanditPolicy.confidence → float`** — `min(num_updates / 20, 1.0)`.  A
+  cold-start gate: 0.0 at zero updates, reaches 1.0 after 20 real training or
+  inference runs.  Values below 0.5 signal that recommendations exist but carry
+  little weight; callers should prefer binary-search fallback.
+  `MIN_UPDATES_FOR_CONFIDENCE = 20` is exposed at the module level.
+
+- **`VLLMWatchdog`** — subprocess supervisor that auto-heals vLLM inference servers
+  on OOM crashes, compressing MTTR from 60–80 min (engineer-assisted) to under 2 min
+  (fully automated).
+  - OOM detection requires **both** a suspicious exit code (`{1, -9, 137}`) **and** an
+    OOM pattern in stderr (8 patterns: `"cuda out of memory"`, `"oom"`, `"killed"`,
+    etc.) — pure exit-code matches (e.g. config errors exiting 1) are never retried.
+  - On confirmed OOM: calls `bandit.recommend_conservative(state_key)` to get a
+    guaranteed-safer config, patches `--max-num-seqs` and `--gpu-memory-utilization`
+    in the CLI command, backs off for `backoff_seconds`, and relaunches.
+  - Cold-start fallback (no Q-table data): applies a fixed *conservative_margin*
+    reduction to the current flag values directly.
+  - `alert_callback(message, attempt, max_retries)` is fired on every recovery
+    attempt and on final failure — wire this to PagerDuty, Slack, or any webhook.
+  - `VLLMWatchdog.stop()` sends SIGTERM and prevents restart after the process exits.
+  - `_patch_flag(cmd, flag, new_value)` handles both `--flag value` and
+    `--flag=value` forms; never mutates the original list.
+
+- **`guard_vllm_watchdog(model, *, host, port, max_num_seqs, gpu_memory_utilization,
+  tensor_parallel_size, model_params, model_bits, bandit, max_retries,
+  backoff_seconds, conservative_margin, alert_callback, extra_args) → VLLMWatchdog`**
+  — convenience constructor.  Builds the vLLM CLI command, derives the `StateKey`
+  from the current platform, loads or reuses a `BanditPolicy`, and returns a
+  ready-to-run watchdog.  `extra_args` are appended verbatim.
+
+- **`KVCacheMonitor.critical_threshold`** (default `0.95`) — KV cache usage fraction
+  above which a planned graceful restart is triggered.
+
+- **`KVCacheMonitor.restart_callback`** — zero-argument callable invoked when
+  utilization stays at or above `critical_threshold` for `critical_ticks` consecutive
+  poll ticks.  The caller wires this to the process supervisor (e.g.
+  `VLLMWatchdog.stop` + relaunch).  `None` disables the feature.
+
+- **`KVCacheMonitor.critical_ticks`** (default `3`) — number of consecutive ticks
+  above `critical_threshold` required before `restart_callback` fires.  A single
+  transient spike never triggers a restart; the consecutive counter resets to 0 on
+  any tick below the threshold and on every `monitor.start()` call.
+
+### Tests
+
+- **`tests/test_bandit_recommend.py`** — 22 tests covering `recommend()` argmax,
+  cold-start `None`, determinism across 50 calls, state-key isolation;
+  `recommend_conservative()` 15 % margin math, floor clamping at 1 / 0,
+  lora_rank / seq_length unchanged; `confidence` linearity, threshold clamp,
+  no-exceed-1.0.
+- **`tests/test_watchdog.py`** — 62 tests covering `_is_oom_exit()` with all
+  8 OOM patterns × 3 exit codes (24 parametrized cases); false-positive guards
+  (exit-code-only, pattern-only with exit 0, exit code 2, empty stderr);
+  case-insensitive matching; `_patch_flag()` space and equals forms, append-when-
+  absent, no mutation; `_apply_action_to_cmd()` patching and zero/None skip guards;
+  `guard_vllm_watchdog()` command construction and attribute propagation.
+- **`tests/test_kvcache_critical.py`** — 20 tests covering attribute defaults;
+  fires after N ticks; does not fire on single spike, N-1 ticks, alternating
+  above/below; counter resets on `start()`; crashing callback doesn't kill thread.
+- **`tests/conftest.py`** — v0.5.0 baseline recorded: **591 passed, 1 skipped
+  (intentional smoke-test gate), 0 failed** across all 17 test files.
+
+### Fixed
+
+- Calculator "How?" panel copy for the KV cache monitor now accurately describes
+  the implemented behaviour — "polls KV cache usage every 5 s; when usage exceeds
+  95 % for 3 consecutive ticks, triggers a planned graceful restart before a crash"
+  — replacing a vague claim about a feature that was not yet built.
+
+---
+
 ## [0.4.0] - 2026-04-10
 
 ### Added — RL Contextual Bandit Optimizer
