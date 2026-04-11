@@ -719,3 +719,27 @@ class MemoryGuard:
                 self._policy.num_states,
                 self._policy.num_updates,
             )
+
+        # Cloud telemetry — fire-and-forget, never raises
+        try:
+            from .cloud import record_telemetry
+            _sk = self._last_state_key
+            _act = self._last_action
+            record_telemetry({
+                "model_name":    model_name,
+                "backend":       self.platform.backend.value,
+                "os_platform":   self.platform.os_platform,
+                "memory_tier":   _sk.device.memory_tier if _sk else "",
+                "param_class":   _sk.model.param_class  if _sk else "",
+                "bits":          _sk.model.bits          if _sk else 0,
+                "batch_size":    _act.batch_size          if _act else 0,
+                "lora_rank":     _act.lora_rank           if _act else 0,
+                "seq_length":    _act.seq_length          if _act else 0,
+                "max_num_seqs":  _act.max_num_seqs        if _act else 0,
+                "estimated_mb":  self._last_estimate_mb or 0,
+                "actual_mb":     actual_peak_mb,
+                "budget_mb":     self.budget_mb,
+                "oom_occurred":  oom_occurred,
+            })
+        except Exception:
+            pass

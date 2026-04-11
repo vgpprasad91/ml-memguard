@@ -125,6 +125,60 @@ def _str_to_action(s: str) -> ConfigAction:
 
 
 # ---------------------------------------------------------------------------
+# Cloud merge helper
+# ---------------------------------------------------------------------------
+
+def _merge_cloud_policy(policy: "BanditPolicy") -> None:
+    """Merge cloud Q-table entries into *policy* in-place.
+
+    Strategy: weighted average by ``num_updates`` for entries that exist in
+    both; cloud-only entries are added directly (free knowledge on cold start).
+    Never raises — cloud failures are silently ignored.
+    """
+    try:
+        from .cloud import download_policy
+        cloud_data = download_policy()
+        if not cloud_data or "q_table" not in cloud_data:
+            return
+
+        cloud_updates: int = int(cloud_data.get("num_updates", 0))
+        local_updates: int = policy.num_updates
+        total: int = cloud_updates + local_updates
+
+        for sk_str, actions_raw in cloud_data["q_table"].items():
+            try:
+                sk = _str_to_state_key(sk_str)
+            except (ValueError, KeyError):
+                continue
+            if not isinstance(actions_raw, dict):
+                continue
+
+            for a_str, cloud_q in actions_raw.items():
+                try:
+                    action = _str_to_action(a_str)
+                    cloud_q = float(cloud_q)
+                except (ValueError, KeyError):
+                    continue
+
+                local_q = policy._q.get(sk, {}).get(action)
+                if local_q is None:
+                    # Cloud has experience we don't — adopt it
+                    policy._q.setdefault(sk, {})[action] = cloud_q
+                elif total > 0:
+                    # Weighted average: more updates → more influence
+                    w_local = local_updates / total
+                    w_cloud = cloud_updates / total
+                    policy._q[sk][action] = w_local * local_q + w_cloud * cloud_q
+
+        logger.debug(
+            "[memory-guard] Merged cloud policy: %d states now loaded.",
+            policy.num_states,
+        )
+    except Exception as exc:
+        logger.debug("[memory-guard] Cloud policy merge skipped: %s", exc)
+
+
+# ---------------------------------------------------------------------------
 # BanditPolicy
 # ---------------------------------------------------------------------------
 
@@ -323,6 +377,13 @@ class BanditPolicy:
         except Exception as exc:
             logger.warning("[memory-guard] Could not save RL policy: %s", exc)
 
+        # Cloud sync — fire-and-forget; never blocks or raises
+        try:
+            from .cloud import upload_policy
+            upload_policy(payload)
+        except Exception:
+            pass
+
     @classmethod
     def load(
         cls,
@@ -349,7 +410,9 @@ class BanditPolicy:
             logger.debug(
                 "[memory-guard] No RL policy at %s — starting fresh.", source
             )
-            return cls(**init_kwargs)
+            policy = cls(**init_kwargs)
+            _merge_cloud_policy(policy)
+            return policy
 
         try:
             with open(source) as f:
@@ -393,6 +456,7 @@ class BanditPolicy:
                 policy.num_states,
                 policy.epsilon,
             )
+            _merge_cloud_policy(policy)
             return policy
 
         except Exception as exc:
