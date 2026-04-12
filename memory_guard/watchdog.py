@@ -229,6 +229,15 @@ class VLLMWatchdog:
         Signature: ``callback(message: str, attempt: int, max_retries: int)``.
         Use this to fire PagerDuty / Slack webhooks.
 
+    ebpf_session:
+        Optional :class:`~memory_guard.ebpf.MemguardBPFSession` (or any
+        duck-typed object with ``add_oom_imminent_callback``).  When
+        provided, an OOM-imminent BPF event triggers :meth:`stop` immediately
+        — compressing MTTR from ~2 min (process-exit detection) to near-zero
+        (kernel-event detection, 200–500 ms before OOM kill).
+        Requires the ``[ebpf]`` extra on Linux.  Silently ignored on other
+        platforms or when BPF is unavailable.
+
     Attributes
     ----------
     current_cmd : List[str]
@@ -247,6 +256,7 @@ class VLLMWatchdog:
         backoff_seconds: float = 5.0,
         conservative_margin: float = 0.15,
         alert_callback: Optional[Callable[[str, int, int], None]] = None,
+        ebpf_session: Optional[object] = None,
     ) -> None:
         if not cmd:
             raise ValueError("cmd must be a non-empty list of strings")
@@ -260,6 +270,7 @@ class VLLMWatchdog:
         self.attempts: int = 0
         self._stop_event: threading.Event = threading.Event()
         self._process: Optional[subprocess.Popen] = None
+        self._ebpf_session: Optional[object] = ebpf_session
 
     # ------------------------------------------------------------------
     # Public interface
@@ -279,6 +290,17 @@ class VLLMWatchdog:
         """
         self._stop_event.clear()
         last_returncode: int = 1
+
+        # Wire BPF OOM-imminent callback — fires before SIGKILL enabling a
+        # graceful SIGTERM-based restart rather than waiting for process exit.
+        if self._ebpf_session is not None:
+            _add_cb = getattr(self._ebpf_session, "add_oom_imminent_callback", None)
+            if callable(_add_cb):
+                _add_cb(self.stop)
+                logger.debug(
+                    "[watchdog] eBPF OOM-imminent callback registered "
+                    "(immediate graceful restart enabled)"
+                )
 
         while not self._stop_event.is_set():
             logger.info(

@@ -96,6 +96,8 @@ class KVCacheMonitor:
         telemetry_os_platform: str = "",
         # --- eBPF cgroup probe (PR 35) ---
         use_ebpf: bool = False,
+        # --- eBPF session (PR 56) — page-fault + mmap probes ---
+        ebpf_session: Optional[Any] = None,
     ) -> None:
         """
         Args:
@@ -161,6 +163,15 @@ class KVCacheMonitor:
             telemetry_backend:  Backend string (``"cuda"``, ``"metal"`` …).
             telemetry_os_platform:
                                 OS platform string (``"linux"`` …).
+            ebpf_session:       Optional :class:`~memory_guard.ebpf.MemguardBPFSession`
+                                (or duck-typed object with ``available``,
+                                ``page_fault_rate``, ``mmap_growth_mbps``, and
+                                ``memory_pressure_bytes`` properties).  When
+                                provided and ``session.available`` is ``True``,
+                                BPF-derived ``page_fault_rate`` and
+                                ``memory_pressure_level`` are merged into each
+                                :class:`~memory_guard.telemetry.InferenceTelemetry`
+                                snapshot.  Zero behavior change when ``None``.
         """
         self.poll_fn = poll_fn
         self.poll_interval = poll_interval
@@ -193,6 +204,8 @@ class KVCacheMonitor:
         self._use_ebpf: bool = use_ebpf
         self._ebpf_wake: threading.Event = threading.Event()
         self._ebpf_manager: Optional[object] = None  # EBPFProbeManager
+        # eBPF session (PR 56) — page-fault + mmap probes
+        self._ebpf_session: Optional[Any] = ebpf_session
 
         self._history: collections.deque[float] = collections.deque(maxlen=history_size)
         self._lock = threading.Lock()
@@ -445,6 +458,19 @@ class KVCacheMonitor:
                 "kvcache_mb":          float(extra.get("kvcache_mb", 0.0)),
             }
 
+            # Merge BPF-derived signals into the predict payload (PR 56)
+            if (
+                self._ebpf_session is not None
+                and getattr(self._ebpf_session, "available", False)
+            ):
+                signals["page_fault_rate"] = float(
+                    getattr(self._ebpf_session, "page_fault_rate", 0.0)
+                )
+                signals["memory_pressure_level"] = (
+                    float(getattr(self._ebpf_session, "memory_pressure_bytes", 0.0))
+                    / (1024 * 1024)
+                )
+
             result = _predict_oom(
                 signals,
                 model_name=self._telemetry_model_name,
@@ -524,20 +550,37 @@ class KVCacheMonitor:
                 except Exception as exc:
                     logger.debug("KVCacheMonitor extended_poll_fn raised: %s", exc)
 
+            # Pull BPF-derived signals when an ebpf_session is active (PR 56)
+            bpf_page_fault_rate: float = 0.0
+            bpf_pressure_mb:     float = 0.0
+            if (
+                self._ebpf_session is not None
+                and getattr(self._ebpf_session, "available", False)
+            ):
+                bpf_page_fault_rate = float(
+                    getattr(self._ebpf_session, "page_fault_rate", 0.0)
+                )
+                bpf_pressure_mb = (
+                    float(getattr(self._ebpf_session, "memory_pressure_bytes", 0.0))
+                    / (1024 * 1024)
+                )
+
             signals = InferenceTelemetry(
-                kv_velocity_mbps    = kv_velocity,
-                fragmentation_ratio = float(extra.get("fragmentation_ratio", 0.0)),
-                eviction_rate       = float(extra.get("eviction_rate", 0.0)),
-                avg_seq_len         = float(extra.get("avg_seq_len", 0.0)),
-                near_miss_count     = int(extra.get("near_miss_count", 0)),
-                preemption_count    = int(extra.get("preemption_count", 0)),
-                weights_mb          = float(extra.get("weights_mb", 0.0)),
-                kvcache_mb          = float(extra.get("kvcache_mb", 0.0)),
-                activations_mb      = float(extra.get("activations_mb", 0.0)),
-                cuda_ctx_mb         = float(extra.get("cuda_ctx_mb", 0.0)),
-                model_name          = self._telemetry_model_name,
-                backend             = self._telemetry_backend,
-                os_platform         = self._telemetry_os_platform,
+                kv_velocity_mbps      = kv_velocity,
+                fragmentation_ratio   = float(extra.get("fragmentation_ratio", 0.0)),
+                eviction_rate         = float(extra.get("eviction_rate", 0.0)),
+                avg_seq_len           = float(extra.get("avg_seq_len", 0.0)),
+                near_miss_count       = int(extra.get("near_miss_count", 0)),
+                preemption_count      = int(extra.get("preemption_count", 0)),
+                weights_mb            = float(extra.get("weights_mb", 0.0)),
+                kvcache_mb            = float(extra.get("kvcache_mb", 0.0)),
+                activations_mb        = float(extra.get("activations_mb", 0.0)),
+                cuda_ctx_mb           = float(extra.get("cuda_ctx_mb", 0.0)),
+                model_name            = self._telemetry_model_name,
+                backend               = self._telemetry_backend,
+                os_platform           = self._telemetry_os_platform,
+                memory_pressure_level = bpf_pressure_mb,
+                page_fault_rate       = bpf_page_fault_rate,
             )
             _upload_signals(signals)
         except Exception as exc:

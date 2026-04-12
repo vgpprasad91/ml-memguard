@@ -93,30 +93,36 @@ class InferenceTelemetry:
     avg_seq_len:         float = 0.0
     near_miss_count:     int   = 0
     preemption_count:    int   = 0
-    weights_mb:          float = 0.0
-    kvcache_mb:          float = 0.0
-    activations_mb:      float = 0.0
-    cuda_ctx_mb:         float = 0.0
-    model_name:          str   = ""
-    backend:             str   = ""
-    os_platform:         str   = ""
+    weights_mb:           float = 0.0
+    kvcache_mb:           float = 0.0
+    activations_mb:       float = 0.0
+    cuda_ctx_mb:          float = 0.0
+    model_name:           str   = ""
+    backend:              str   = ""
+    os_platform:          str   = ""
+    # eBPF signals (PR 56) — populated when an ebpf_session is active;
+    # zero means "not measured" (no eBPF), not "zero pressure".
+    memory_pressure_level: float = 0.0
+    page_fault_rate:       float = 0.0
 
     def to_dict(self) -> dict:
         """Return a JSON-serialisable dict for the telemetry POST body."""
         return {
-            "kv_velocity_mbps":    self.kv_velocity_mbps,
-            "fragmentation_ratio": self.fragmentation_ratio,
-            "eviction_rate":       self.eviction_rate,
-            "avg_seq_len":         self.avg_seq_len,
-            "near_miss_count":     self.near_miss_count,
-            "preemption_count":    self.preemption_count,
-            "weights_mb":          self.weights_mb,
-            "kvcache_mb":          self.kvcache_mb,
-            "activations_mb":      self.activations_mb,
-            "cuda_ctx_mb":         self.cuda_ctx_mb,
-            "model_name":          self.model_name,
-            "backend":             self.backend,
-            "os_platform":         self.os_platform,
+            "kv_velocity_mbps":     self.kv_velocity_mbps,
+            "fragmentation_ratio":  self.fragmentation_ratio,
+            "eviction_rate":        self.eviction_rate,
+            "avg_seq_len":          self.avg_seq_len,
+            "near_miss_count":      self.near_miss_count,
+            "preemption_count":     self.preemption_count,
+            "weights_mb":           self.weights_mb,
+            "kvcache_mb":           self.kvcache_mb,
+            "activations_mb":       self.activations_mb,
+            "cuda_ctx_mb":          self.cuda_ctx_mb,
+            "model_name":           self.model_name,
+            "backend":              self.backend,
+            "os_platform":          self.os_platform,
+            "memory_pressure_level": self.memory_pressure_level,
+            "page_fault_rate":      self.page_fault_rate,
             # Required by the runs schema; inference telemetry rows are not OOM events
-            "oom_occurred":        0,
+            "oom_occurred":         0,
         }
