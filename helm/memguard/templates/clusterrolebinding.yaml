@@ -1,0 +1,24 @@
+{{- if .Values.serviceAccount.create }}
+# ---------------------------------------------------------------------------
+# ClusterRoleBinding — binds the memguard sidecar ServiceAccount to the
+# policy-reader ClusterRole that grants MemGuardPolicy get/list/watch.
+#
+# Scope: the sidecar SA in this release's namespace gets read-only access to
+# MemGuardPolicy objects across all namespaces (required for ClusterRole
+# bindings). The sidecar watcher only queries its own namespace.
+# ---------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "memguard.fullname" . }}-policy-reader
+  labels:
+    {{- include "memguard.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "memguard.fullname" . }}-policy-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "memguard.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

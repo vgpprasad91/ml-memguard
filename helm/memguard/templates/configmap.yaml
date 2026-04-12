@@ -8,6 +8,7 @@ data:
   MEMGUARD_SHED_THRESHOLD: {{ .Values.sidecar.shedThreshold | quote }}
   MEMGUARD_POLL_INTERVAL:  {{ .Values.sidecar.pollInterval  | quote }}
   MEMGUARD_SMOOTHING_WIN:  {{ .Values.sidecar.smoothingWindow | quote }}
-  MEMGUARD_MODEL_NAME: {{ (.Values.sidecar.modelName | default .Values.vllm.modelName) | quote }}
-  MEMGUARD_BACKEND:    {{ .Values.sidecar.backend | quote }}
-  VLLM_MODEL_NAME:     {{ .Values.vllm.modelName  | quote }}
+  MEMGUARD_MODEL_NAME:   {{ (.Values.sidecar.modelName | default .Values.vllm.modelName) | quote }}
+  MEMGUARD_BACKEND:      {{ .Values.sidecar.backend | quote }}
+  VLLM_MODEL_NAME:       {{ .Values.vllm.modelName  | quote }}
+  MEMGUARD_POLICY_NAME:  {{ .Values.memguardPolicy.name | quote }}

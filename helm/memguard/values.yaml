@@ -217,6 +217,28 @@ patchExistingDeployment:
   containerName: "vllm"
 
 # ---------------------------------------------------------------------------
+# MemGuardPolicy CRD — optional in-cluster hot-reload
+#
+# When name is non-empty and the sidecar is running inside a Kubernetes pod,
+# the sidecar fetches the named MemGuardPolicy on startup and watches it for
+# changes.  Threshold updates take effect within one probe cycle — no pod
+# restart required.
+#
+# Create the CRD object first:
+#   kubectl apply -f examples/k8s/memguardpolicy.yaml -n inference
+#
+# Then reference it here:
+#   helm upgrade my-vllm memguard/memguard \
+#     --set memguardPolicy.name=default \
+#     --reuse-values
+#
+# Leave empty to use the values from ConfigMap (sidecar.shedThreshold etc.)
+# without CRD hot-reload.
+# ---------------------------------------------------------------------------
+memguardPolicy:
+  name: ""
+
+# ---------------------------------------------------------------------------
 # Optional: memguard-cloud API key
 # Populate via: helm install ... --set memguardCloud.apiKey=mg_...
 # or by referencing an existing Secret (set existingSecret).

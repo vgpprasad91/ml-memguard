@@ -51,10 +51,11 @@ from __future__ import annotations
 import http.server
 import json
 import logging
+import os
 import re
 import threading
 import urllib.request
-from typing import TYPE_CHECKING, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 if TYPE_CHECKING:
     from .inference_monitor import KVCacheMonitor
@@ -261,6 +262,93 @@ class MemGuardSidecar:
 
 
 # ---------------------------------------------------------------------------
+# MemGuardPolicy hot-reload helpers
+# ---------------------------------------------------------------------------
+
+def _apply_policy_spec(
+    spec: Dict[str, Any],
+    sidecar: "MemGuardSidecar",
+    monitor: "KVCacheMonitor",
+) -> None:
+    """Apply a MemGuardPolicy spec dict to the running sidecar and monitor.
+
+    Called on startup (initial GET) and on every hot-reload watch event.
+    All assignments are atomic scalar writes — safe to call from any thread
+    under the Python GIL.
+
+    Supported spec keys (all optional — missing keys are silently ignored):
+      shedThreshold    → sidecar._threshold
+      warningThreshold → monitor.THRESHOLD_WARNING  (instance shadow)
+      smoothingWindow  → monitor._smoothing_window  (if attribute exists)
+      telemetryBackend → monitor._telemetry_backend
+    """
+    if "shedThreshold" in spec:
+        v = float(spec["shedThreshold"])
+        sidecar._threshold = v
+        logger.info("[memguard] MemGuardPolicy: shedThreshold → %.2f", v)
+    if "warningThreshold" in spec:
+        v = float(spec["warningThreshold"])
+        monitor.THRESHOLD_WARNING = v  # type: ignore[assignment]
+        logger.info("[memguard] MemGuardPolicy: warningThreshold → %.2f", v)
+    if "smoothingWindow" in spec:
+        v = int(spec["smoothingWindow"])
+        if hasattr(monitor, "_smoothing_window"):
+            monitor._smoothing_window = v  # type: ignore[assignment]
+        logger.info("[memguard] MemGuardPolicy: smoothingWindow → %d", v)
+    if spec.get("telemetryBackend"):
+        monitor._telemetry_backend = str(spec["telemetryBackend"])
+        logger.info(
+            "[memguard] MemGuardPolicy: telemetryBackend → %s",
+            monitor._telemetry_backend,
+        )
+
+
+def _start_policy_watcher(
+    policy_name: str,
+    sidecar: "MemGuardSidecar",
+    monitor: "KVCacheMonitor",
+) -> Optional[Any]:
+    """Start a K8sPolicyWatcher when running in-cluster and policy_name is set.
+
+    1. Fetches the initial MemGuardPolicy spec (blocking GET) and applies it.
+    2. Starts a background daemon thread for real-time hot-reload.
+
+    Returns the K8sPolicyWatcher instance (call .stop() on shutdown) or None
+    when not in-cluster, policy_name is empty, or k8s_policy is unavailable.
+    """
+    if not policy_name:
+        return None
+    try:
+        from .k8s_policy import K8sPolicyWatcher
+    except ImportError:
+        logger.debug("[memguard] k8s_policy not importable — policy watch disabled")
+        return None
+
+    if not K8sPolicyWatcher.is_in_cluster():
+        logger.debug(
+            "[memguard] Not running in-cluster — MemGuardPolicy watch disabled"
+        )
+        return None
+
+    watcher = K8sPolicyWatcher(policy_name=policy_name)
+
+    initial_spec = watcher.get()
+    if initial_spec:
+        _apply_policy_spec(initial_spec, sidecar, monitor)
+    else:
+        logger.debug(
+            "[memguard] MemGuardPolicy %r not found — using built-in defaults",
+            policy_name,
+        )
+
+    watcher.watch(lambda spec: _apply_policy_spec(spec, sidecar, monitor))
+    logger.info(
+        "[memguard] MemGuardPolicy watcher active for policy %r", policy_name
+    )
+    return watcher
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point  (python -m memory_guard.sidecar)
 # ---------------------------------------------------------------------------
 
@@ -305,6 +393,10 @@ def main() -> None:
                    help="Backend framework string attached to monitoring signals")
     p.add_argument("--smoothing-window", type=int, default=1, dest="smoothing_window",
                    help="Rolling-max window for KV utilization smoothing (default: 1; use 3 for SGLang)")
+    p.add_argument("--policy-name",  default=os.environ.get("MEMGUARD_POLICY_NAME", ""),
+                   dest="policy_name",
+                   help="Name of a MemGuardPolicy CRD to watch for hot-reload "
+                        "(in-cluster only; reads MEMGUARD_POLICY_NAME env var)")
     args = p.parse_args()
 
     monitor = _build_monitor_from_args(
@@ -315,8 +407,13 @@ def main() -> None:
     )
     sidecar = MemGuardSidecar(monitor, threshold=args.threshold)
 
+    # Start MemGuardPolicy watcher for in-cluster hot-reload (no-op outside k8s)
+    _policy_watcher = _start_policy_watcher(args.policy_name, sidecar, monitor)
+
     def _shutdown(signum: int, frame: object) -> None:
         logger.info("[memguard-sidecar] Shutting down (signal %d).", signum)
+        if _policy_watcher is not None:
+            _policy_watcher.stop()
         sidecar.stop()
         monitor.stop()
         sys.exit(0)

@@ -1,0 +1,76 @@
+# ---------------------------------------------------------------------------
+# MemGuardPolicy — production tuning for a 70B parameter model on H100 GPUs
+#
+# This policy is applied at runtime to the memguard sidecar without a pod
+# restart.  The sidecar watches this resource via the Kubernetes streaming
+# API and hot-reloads thresholds within seconds of an `kubectl apply`.
+#
+# Usage:
+#   kubectl apply -f memguardpolicy.yaml -n inference
+#
+# Verify:
+#   kubectl get memguardpolicies -n inference
+#   kubectl describe memguardpolicy default -n inference
+#
+# Hot-reload a threshold change:
+#   kubectl patch memguardpolicy default -n inference \
+#     --type=merge -p '{"spec":{"shedThreshold":0.75}}'
+#   # The sidecar log shows: [memguard] MemGuardPolicy default/inference MODIFIED
+#   # /readyz picks up the new threshold on the next probe
+# ---------------------------------------------------------------------------
+apiVersion: memguard.io/v1alpha1
+kind: MemGuardPolicy
+metadata:
+  name: default
+  namespace: inference
+  labels:
+    app.kubernetes.io/managed-by: helm
+    app.kubernetes.io/component: memguard-policy
+spec:
+  # ---------------------------------------------------------------------------
+  # shedThreshold (0.01–1.0, default 0.70)
+  #
+  # OOM probability above which /readyz returns HTTP 503.
+  # Kubernetes removes the pod from the Service endpoint set on the next probe.
+  #
+  # 70B on H100: use 0.80.  The larger KV cache (80 GB HBM) fills more slowly
+  # than a 8B model — the extra headroom lets KEDA add replicas before shedding.
+  # ---------------------------------------------------------------------------
+  shedThreshold: 0.80
+
+  # ---------------------------------------------------------------------------
+  # warningThreshold (0.01–shedThreshold, default 0.50)
+  #
+  # OOM probability above which a WARNING log is emitted but no load is shed.
+  # Use as an early alert signal for dashboards and on-call pages.
+  # ---------------------------------------------------------------------------
+  warningThreshold: 0.60
+
+  # ---------------------------------------------------------------------------
+  # smoothingWindow (1–30, default 1)
+  #
+  # Rolling-max window in poll ticks applied to KV utilization samples.
+  # Use 1 for vLLM (PagedAttention). Use 3 for SGLang (RadixAttention eviction
+  # drops cause utilization to bounce; smoothing prevents false-positive 503s).
+  # ---------------------------------------------------------------------------
+  smoothingWindow: 1
+
+  # ---------------------------------------------------------------------------
+  # allocatorEnabled (default false)
+  #
+  # When true, the sidecar calls make_extended_poll_fn() from memguard-allocator
+  # to enable kernel-level near-miss and fragmentation tracking via the CUDA
+  # Pluggable Allocator.  Silently ignored when memguard-allocator is absent.
+  #
+  # Required: pip install memguard-allocator (BSL-1.1 commercial license)
+  # ---------------------------------------------------------------------------
+  allocatorEnabled: false
+
+  # ---------------------------------------------------------------------------
+  # telemetryBackend (default "")
+  #
+  # Hardware backend string attached to cloud telemetry signals.
+  # Overrides the MEMGUARD_BACKEND environment variable.
+  # Common values: "h100", "a100", "l40s", "cuda", "metal"
+  # ---------------------------------------------------------------------------
+  telemetryBackend: "h100"

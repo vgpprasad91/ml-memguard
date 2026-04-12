@@ -110,7 +110,8 @@ spec:
                 --poll-interval $(MEMGUARD_POLL_INTERVAL) \
                 --smoothing-window $(MEMGUARD_SMOOTHING_WIN) \
                 --model-name    "$(MEMGUARD_MODEL_NAME)" \
-                --backend       "$(MEMGUARD_BACKEND)"
+                --backend       "$(MEMGUARD_BACKEND)" \
+                --policy-name   "$(MEMGUARD_POLICY_NAME)"
           ports:
             - name: sidecar
               containerPort: {{ .Values.sidecar.port }}

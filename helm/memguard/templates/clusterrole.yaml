@@ -1,0 +1,27 @@
+{{- if .Values.serviceAccount.create }}
+# ---------------------------------------------------------------------------
+# ClusterRole — grants the memguard sidecar ServiceAccount read access to
+# MemGuardPolicy objects so the sidecar can hot-reload its thresholds at
+# runtime without a pod restart.
+#
+# Why ClusterRole (not Role):
+#   A Role can also grant namespaced CRD access, but ClusterRole is idiomatic
+#   for CRD read access and allows future cross-namespace fleet policy queries
+#   without rebinding. The watcher only GETs/WATCHes within its own namespace.
+#
+# Permissions granted:
+#   get   — one-time fetch of the initial MemGuardPolicy spec on startup
+#   list  — enumerate policies (used by the watcher for resourceVersion seed)
+#   watch — streaming ?watch=true connection for real-time hot-reload
+# ---------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "memguard.fullname" . }}-policy-reader
+  labels:
+    {{- include "memguard.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["memguard.io"]
+    resources: ["memguardpolicies"]
+    verbs: ["get", "list", "watch"]
+{{- end }}

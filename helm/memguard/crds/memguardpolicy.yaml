@@ -1,0 +1,102 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: memguardpolicies.memguard.io
+  annotations:
+    # Keep CRD when chart is deleted — policy objects would be orphaned otherwise
+    "helm.sh/resource-policy": keep
+spec:
+  group: memguard.io
+  scope: Namespaced
+  names:
+    plural: memguardpolicies
+    singular: memguardpolicy
+    kind: MemGuardPolicy
+    shortNames:
+      - mgp
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      # ---------------------------------------------------------------------------
+      # kubectl get memguardpolicies output columns
+      # ---------------------------------------------------------------------------
+      additionalPrinterColumns:
+        - name: ShedThreshold
+          type: string
+          jsonPath: .spec.shedThreshold
+          description: OOM probability that triggers /readyz 503
+        - name: WarningThreshold
+          type: string
+          jsonPath: .spec.warningThreshold
+          description: OOM probability that triggers a warning log
+        - name: SmoothingWindow
+          type: integer
+          jsonPath: .spec.smoothingWindow
+          description: Rolling-max smoothing window (1=vLLM, 3=SGLang)
+        - name: AllocatorEnabled
+          type: boolean
+          jsonPath: .spec.allocatorEnabled
+          description: Whether memguard-allocator CUDA kernel tracking is active
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              properties:
+                shedThreshold:
+                  type: number
+                  format: double
+                  minimum: 0.01
+                  maximum: 1.0
+                  description: >
+                    OOM probability above which /readyz returns HTTP 503 and the pod
+                    is removed from the Service endpoint set. Must be greater than
+                    warningThreshold. Default: 0.70.
+                warningThreshold:
+                  type: number
+                  format: double
+                  minimum: 0.01
+                  maximum: 1.0
+                  description: >
+                    OOM probability above which a warning is emitted but no load is
+                    shed. Must be less than shedThreshold. Default: 0.50.
+                smoothingWindow:
+                  type: integer
+                  minimum: 1
+                  maximum: 30
+                  description: >
+                    Rolling-max window (in poll ticks) applied to KV cache utilization
+                    samples before the OOM probability is computed. Use 1 for vLLM
+                    (PagedAttention, no smoothing needed). Use 3 for SGLang
+                    (RadixAttention eviction drops require smoothing). Default: 1.
+                allocatorEnabled:
+                  type: boolean
+                  description: >
+                    When true, the memguard-allocator CUDA pluggable allocator is
+                    expected to be attached to vLLM's CUDA context. The sidecar
+                    will attempt to call make_extended_poll_fn() from memguard-allocator
+                    for kernel-level near-miss and fragmentation tracking. Silently
+                    ignored when memguard-allocator is not installed. Default: false.
+                telemetryBackend:
+                  type: string
+                  maxLength: 128
+                  description: >
+                    Hardware backend string attached to cloud telemetry signals
+                    (e.g. "cuda", "metal", "h100", "a100"). Overrides the value
+                    set by MEMGUARD_BACKEND environment variable when non-empty.
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+      subresources:
+        status: {}
