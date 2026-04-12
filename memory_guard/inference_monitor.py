@@ -94,6 +94,8 @@ class KVCacheMonitor:
         telemetry_model_name: str = "",
         telemetry_backend: str = "",
         telemetry_os_platform: str = "",
+        # --- eBPF cgroup probe (PR 35) ---
+        use_ebpf: bool = False,
     ) -> None:
         """
         Args:
@@ -187,6 +189,11 @@ class KVCacheMonitor:
         _PREDICTIVE_RESTART_COOLDOWN = 120.0   # module-level constant for tests
         self._predictive_restart_cooldown: float = _PREDICTIVE_RESTART_COOLDOWN
 
+        # eBPF state (PR 35)
+        self._use_ebpf: bool = use_ebpf
+        self._ebpf_wake: threading.Event = threading.Event()
+        self._ebpf_manager: Optional[object] = None  # EBPFProbeManager
+
         self._history: collections.deque[float] = collections.deque(maxlen=history_size)
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -254,6 +261,12 @@ class KVCacheMonitor:
         self._last_predictive_restart = 0.0
         self._last_oom_probability = 0.0
         self._stop.clear()
+        self._ebpf_wake.clear()
+
+        # Load eBPF probes when requested (Linux + bcc only; silently skips otherwise)
+        if self._use_ebpf:
+            self._start_ebpf()
+
         self._thread = threading.Thread(
             target=self._loop, daemon=True, name="kv-cache-monitor"
         )
@@ -270,9 +283,18 @@ class KVCacheMonitor:
     def stop(self) -> None:
         """Signal the background thread to stop and join it."""
         self._stop.set()
+        self._ebpf_wake.set()  # unblock _ebpf_wake.wait() immediately
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=self.poll_interval + 2)
         self._thread = None
+
+        # Stop eBPF manager if running
+        if self._ebpf_manager is not None:
+            try:
+                self._ebpf_manager.stop()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            self._ebpf_manager = None
 
     def session(self) -> "_KVCacheSession":
         """Return a context manager that starts and stops this monitor."""
@@ -350,11 +372,41 @@ class KVCacheMonitor:
                 self._upload_inference_telemetry(kv_velocity)
                 self._last_telemetry_upload = now
 
-            self._stop.wait(self.poll_interval)
+            # Wait up to poll_interval; eBPF events short-circuit the wait
+            self._ebpf_wake.wait(self.poll_interval)
+            self._ebpf_wake.clear()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _start_ebpf(self) -> None:
+        """Load and start the EBPFProbeManager.  Silently skips on failure."""
+        try:
+            from .ebpf import EBPFProbeManager
+
+            def _on_high(event: object) -> None:
+                logger.debug("[memory-guard] eBPF memory.high: %s", event)
+
+            def _on_oom(event: object) -> None:
+                logger.warning("[memory-guard] eBPF OOM killer invoked: %s", event)
+
+            mgr = EBPFProbeManager(
+                on_high=_on_high,
+                on_oom=_on_oom,
+                ebpf_wake=self._ebpf_wake,
+            )
+            mgr.load()
+            mgr.start()
+            self._ebpf_manager = mgr
+            logger.debug("[memory-guard] EBPFProbeManager loaded and started")
+        except (ImportError, PermissionError, OSError) as exc:
+            logger.debug(
+                "[memory-guard] eBPF probes unavailable (%s: %s) — "
+                "falling back to poll-based detection",
+                type(exc).__name__,
+                exc,
+            )
 
     def _run_predict_oom(
         self,
