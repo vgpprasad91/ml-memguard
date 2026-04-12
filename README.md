@@ -583,6 +583,33 @@ Then open a [GitHub issue](https://github.com/vgpprasad91/ml-memguard/issues/new
 - **Accuracy data**: Real training runs on CUDA or non-Apple hardware — see the table above
 - **Bug reports**: If the estimate was off by >30%, that's a bug — please report it with your config
 
+## Telemetry & Privacy
+
+When `MEMGUARD_BACKEND_KEY` is set, memguard sends anonymous hardware and memory
+metrics to improve OOM predictions across the fleet. **No model weights, training
+data, prompts, or file paths are ever collected.**
+
+What is sent: hardware config (backend, VRAM tier, quantization), memory usage
+curves (estimated vs actual MB), and OOM outcomes. Retention is 90 days.
+
+**To opt out:**
+
+```bash
+export MEMGUARD_TELEMETRY=off
+```
+
+To see the exact JSON schema:
+
+```bash
+memguard-explain-telemetry          # human-readable table
+memguard-explain-telemetry --json   # machine-readable
+memguard-sidecar --explain-telemetry
+```
+
+Full privacy documentation: [docs/privacy.md](docs/privacy.md)
+
+---
+
 ## License
 
 Apache 2.0

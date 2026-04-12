@@ -303,7 +303,16 @@ def main() -> None:
                    help="Model identifier forwarded to ml-memguard telemetry")
     p.add_argument("--backend",       default="",
                    help="Backend string forwarded to ml-memguard telemetry")
+    p.add_argument("--smoothing-window", type=int, default=1, dest="smoothing_window",
+                   help="Rolling-max window for KV utilization smoothing (default: 1; use 3 for SGLang)")
+    p.add_argument("--explain-telemetry", action="store_true", dest="explain_telemetry",
+                   help="Print the exact telemetry schema sent to ml-memguard and exit")
     args = p.parse_args()
+
+    if args.explain_telemetry:
+        from .telemetry_explain import print_schema
+        print_schema()
+        sys.exit(0)
 
     monitor = _build_monitor_from_args(
         vllm_url      = args.vllm_url,
