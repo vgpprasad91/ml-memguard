@@ -105,6 +105,8 @@ __all__ = [
     "PreemptionEvent",
     # Higher-level probe wrappers
     "CgroupMemoryHighProbe",
+    "PageFaultProbe",
+    "MmapGrowthProbe",
     # Module flag
     "BPF_AVAILABLE",
 ]
@@ -310,4 +312,4 @@ from ._session import MemguardBPFSession  # noqa: E402
 # Higher-level probe wrappers
 # ---------------------------------------------------------------------------
 
-from .probes import CgroupMemoryHighProbe  # noqa: E402
+from .probes import CgroupMemoryHighProbe, MmapGrowthProbe, PageFaultProbe  # noqa: E402
