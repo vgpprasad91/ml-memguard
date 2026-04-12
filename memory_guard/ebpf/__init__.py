@@ -103,6 +103,8 @@ __all__ = [
     "LEVEL_OOM",
     "PreemptionProbe",
     "PreemptionEvent",
+    # Higher-level probe wrappers
+    "CgroupMemoryHighProbe",
     # Module flag
     "BPF_AVAILABLE",
 ]
@@ -303,3 +305,9 @@ class EBPFProbeManager:
 # ---------------------------------------------------------------------------
 
 from ._session import MemguardBPFSession  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Higher-level probe wrappers
+# ---------------------------------------------------------------------------
+
+from .probes import CgroupMemoryHighProbe  # noqa: E402
