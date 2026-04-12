@@ -6,9 +6,16 @@ version: "3.9"
 #   - vllm:8000     — vLLM OpenAI-compatible inference server
 #   - sidecar:8001  — memguard sidecar (/healthz and /readyz for k8s probes)
 #
+# Optional allocator profile (ENABLE_ALLOCATOR=true):
+#   - allocator-build — compiles libmemguard_allocator.so into a named volume
+#     so the sidecar can call memguard_allocator.install() for ring-buffer telemetry
+#
 # Usage:
 #   cp .env.example .env   # fill in MODEL_NAME, HF_TOKEN
 #   docker compose up
+#
+#   # With GPU allocator hooks (CUDA only):
+#   ENABLE_ALLOCATOR=true docker compose --profile allocator up
 #
 # Test endpoints:
 #   curl http://localhost:8000/health          # vLLM liveness
@@ -56,18 +63,33 @@ services:
     image: python:3.11-slim
     ports:
       - "${SIDECAR_PORT:-8001}:8001"
-    # Install ml-memguard, then start the sidecar.
+    # Install ml-memguard (and optionally memguard-allocator), then start the sidecar.
     # Polls vLLM's /metrics endpoint every MEMGUARD_POLL_INTERVAL seconds
     # and exposes /healthz + /readyz on port 8001.
+    #
+    # When ENABLE_ALLOCATOR=true the sidecar also installs memguard-allocator
+    # and calls install() so per-request allocation telemetry is included in
+    # InferenceTelemetry uploads.  The compiled .so is read from the
+    # allocator-lib volume (populated by the allocator-build service).
     command: >
-      sh -c "pip install ml-memguard --quiet --no-cache-dir &&
-             python -m memory_guard.sidecar
-               --vllm-url      http://vllm:8000
-               --host          0.0.0.0
-               --port          8001
-               --threshold     ${MEMGUARD_SHED_THRESHOLD:-0.70}
-               --poll-interval ${MEMGUARD_POLL_INTERVAL:-5.0}
-               --model-name    '${MODEL_NAME}'"
+      sh -c "
+        pip install ml-memguard --quiet --no-cache-dir;
+        if [ \"$${ENABLE_ALLOCATOR}\" = 'true' ]; then
+          pip install memguard-allocator --quiet --no-cache-dir;
+          export MEMGUARD_ALLOCATOR_LIB_PATH=/opt/allocator-lib;
+        fi;
+        python -m memory_guard.sidecar
+          --vllm-url      http://vllm:8000
+          --host          0.0.0.0
+          --port          8001
+          --threshold     $${MEMGUARD_SHED_THRESHOLD:-0.70}
+          --poll-interval $${MEMGUARD_POLL_INTERVAL:-5.0}
+          --model-name    '$${MODEL_NAME}'
+      "
+    environment:
+      ENABLE_ALLOCATOR: "${ENABLE_ALLOCATOR:-false}"
+    volumes:
+      - allocator-lib:/opt/allocator-lib:ro
     depends_on:
       vllm:
         condition: service_healthy
@@ -78,5 +100,48 @@ services:
       timeout: 5s
       retries: 3
 
+  # ---------------------------------------------------------------------------
+  # memguard-allocator build service  (profile: allocator)
+  #
+  # Enable with:  ENABLE_ALLOCATOR=true docker compose --profile allocator up
+  #
+  # Compiles libmemguard_allocator.so from source and writes it into the
+  # "allocator-lib" named volume.  The sidecar mounts the same volume at
+  # /opt/memguard_allocator so that memguard_allocator.install() finds the
+  # shared library on startup.
+  #
+  # On CUDA hosts this enables full ring-buffer allocation telemetry.
+  # On CPU-only hosts the build will succeed but install() will raise
+  # RuntimeError (no CUDA) — the sidecar falls back to KV-only monitoring.
+  # ---------------------------------------------------------------------------
+  allocator-build:
+    profiles: ["allocator"]
+    image: python:3.11-slim
+    environment:
+      ENABLE_ALLOCATOR: "${ENABLE_ALLOCATOR:-false}"
+    command: >
+      sh -c "
+        if [ \"$$ENABLE_ALLOCATOR\" != 'true' ]; then
+          echo 'ENABLE_ALLOCATOR not set — skipping allocator build'; exit 0;
+        fi;
+        apt-get update -qq &&
+        apt-get install -y --no-install-recommends cmake build-essential curl &&
+        pip install memguard-allocator --quiet --no-cache-dir &&
+        memguard-allocator-build --prefix /out &&
+        cp /out/libmemguard_allocator.so /opt/allocator-lib/ &&
+        echo 'libmemguard_allocator.so written to allocator-lib volume'
+      "
+    volumes:
+      - allocator-lib:/opt/allocator-lib
+    # GPU access required for CUDA compile
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
 volumes:
   huggingface-cache:
+  allocator-lib:
