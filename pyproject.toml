@@ -58,6 +58,7 @@ Changelog = "https://github.com/memguard-project/ml-memguard/blob/main/CHANGELOG
 
 [tool.hatch.build.targets.wheel]
 packages = ["memory_guard"]
+include = ["memory_guard/data/gpu_tier_catalog.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

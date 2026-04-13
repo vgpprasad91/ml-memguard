@@ -5,11 +5,17 @@ human-readable table showing the current GPU tier, recommended tier,
 P94 peak, waste percentage, and estimated monthly savings for each
 monitored source/model pair.
 
-Authentication
---------------
-Set MEMGUARD_API_KEY (or the legacy MEMGUARD_BACKEND_KEY) to your API key.
-Set MEMGUARD_API_URL to the URL of your deployed memguard-cloud Worker.
-Both variables are required; the CLI exits with code 1 if either is absent.
+Modes
+-----
+Local mode (default when MEMGUARD_API_URL is unset):
+  Reads from ~/.memory-guard/telemetry.db — built up automatically by
+  KVCacheMonitor.  No API key or cloud account required.  Requires at
+  least 10 runs per (source, model) pair within the lookback window.
+
+Cloud mode (MEMGUARD_API_URL set, or --local not passed):
+  Calls the memguard-cloud Worker.  Set MEMGUARD_API_KEY (or the legacy
+  MEMGUARD_BACKEND_KEY) to your API key.  Use --local to force local mode
+  even when MEMGUARD_API_URL is set.
 
 Usage
 -----
@@ -230,15 +236,51 @@ def main() -> None:
         metavar="NAME",
         help="Filter output to a single model_name (substring match on the client side).",
     )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help=(
+            "Force local mode — read from ~/.memory-guard/telemetry.db even when "
+            "MEMGUARD_API_URL is set.  Useful for per-machine reports and offline use."
+        ),
+    )
     args = parser.parse_args()
 
-    if not os.environ.get("MEMGUARD_API_URL"):
-        sys.exit(
-            "Error: MEMGUARD_API_URL is not set. "
-            "Deploy the Worker (see memguard-cloud/DEPLOYMENT.md) and export the URL."
-        )
+    lookback  = max(1, min(90, args.lookback_days))
+    use_local = args.local or not os.environ.get("MEMGUARD_API_URL")
 
-    lookback = max(1, min(90, args.lookback_days))
+    # ------------------------------------------------------------------
+    # Local mode: zero-cloud path (PR 80)
+    # ------------------------------------------------------------------
+    if use_local:
+        from ..local_efficiency import compute_local_efficiency_report
+
+        result = compute_local_efficiency_report(
+            lookback_days=lookback,
+            source_id_filter=args.source_id,
+            model_filter=args.model,
+        )
+        if result is None:
+            print(
+                "No local telemetry yet — run guard_vllm for a few days, then retry."
+            )
+            sys.exit(0)
+
+        loc_sources: List[Dict[str, Any]] = result["sources"]
+        loc_savings: Optional[int]        = result.get("total_estimated_monthly_savings_usd")
+
+        if args.as_json:
+            out: Dict[str, Any] = {"sources": loc_sources}
+            if loc_savings is not None:
+                out["total_estimated_monthly_savings_usd"] = loc_savings
+            print(json.dumps(out, indent=2))
+        else:
+            _print_table(loc_sources, loc_savings)
+        return
+
+    # ------------------------------------------------------------------
+    # Cloud mode: call the memguard-cloud Worker
+    # ------------------------------------------------------------------
     params   = {"lookback_days": str(lookback)}
     endpoint = "/v1/efficiency/fleet" if args.fleet else "/v1/efficiency"
     data     = _get(endpoint, params)
@@ -259,10 +301,10 @@ def main() -> None:
     total_savings: Optional[int] = data.get("total_estimated_monthly_savings_usd")
 
     if args.as_json:
-        out: Dict[str, Any] = {"sources": sources}
+        out2: Dict[str, Any] = {"sources": sources}
         if total_savings is not None:
-            out["total_estimated_monthly_savings_usd"] = total_savings
-        print(json.dumps(out, indent=2))
+            out2["total_estimated_monthly_savings_usd"] = total_savings
+        print(json.dumps(out2, indent=2))
     else:
         _print_table(sources, total_savings)
 
