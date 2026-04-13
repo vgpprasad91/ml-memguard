@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import collections
 import logging
+import os
+import sqlite3
 import threading
 import time
 from typing import Any, Callable, Dict, Optional
@@ -884,6 +886,49 @@ class KVCacheMonitor:
         self._prev_poll_time = now
         return velocity
 
+    # ------------------------------------------------------------------
+    # Local SQLite telemetry persistence (PR 79)
+    # ------------------------------------------------------------------
+
+    _LOCAL_DB_SCHEMA = """
+        CREATE TABLE IF NOT EXISTS runs (
+            id              INTEGER PRIMARY KEY,
+            source_id       TEXT,
+            model_name      TEXT,
+            reserved_vram_mb REAL,
+            total_peak_mb   REAL,
+            device_count    INTEGER,
+            recorded_at     INTEGER DEFAULT (strftime('%s','now'))
+        )
+    """
+
+    def _write_local_telemetry(self, telemetry: Any) -> None:
+        """Persist one telemetry record to ~/.memory-guard/telemetry.db.
+
+        Uses stdlib sqlite3 — no new dependencies.  Errors are swallowed so
+        a disk-full or permissions problem never propagates to the monitor loop.
+        """
+        try:
+            db_dir = os.path.expanduser("~/.memory-guard")
+            os.makedirs(db_dir, exist_ok=True)
+            db_path = os.path.join(db_dir, "telemetry.db")
+            with sqlite3.connect(db_path, timeout=5) as conn:
+                conn.execute(self._LOCAL_DB_SCHEMA)
+                conn.execute(
+                    "INSERT INTO runs "
+                    "(source_id, model_name, reserved_vram_mb, total_peak_mb, device_count) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        self._source_id,
+                        getattr(telemetry, "model_name", ""),
+                        getattr(telemetry, "reserved_vram_mb", 0.0),
+                        getattr(telemetry, "total_peak_mb", 0.0),
+                        getattr(telemetry, "device_count", 1),
+                    ),
+                )
+        except Exception as exc:
+            logger.debug("KVCacheMonitor local telemetry write failed: %s", exc)
+
     def _upload_inference_telemetry(self, kv_velocity: float) -> None:
         """Collect extended signals and post to cloud.upload_inference_telemetry.
 
@@ -946,6 +991,8 @@ class KVCacheMonitor:
                 # PR 72: multi-GPU device count; 1 = single-GPU (default)
                 device_count               = self._device_count,
             )
+            # PR 79: always write locally first; cloud upload is optional
+            self._write_local_telemetry(signals)
             _upload_signals(signals)
         except Exception as exc:
             logger.debug("KVCacheMonitor telemetry upload raised: %s", exc)
