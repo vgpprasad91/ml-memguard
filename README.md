@@ -20,9 +20,31 @@ pip install ml-memguard[vllm]           # + vLLM inference serving adapter
 pip install ml-memguard[sglang]         # + SGLang inference serving adapter
 ```
 
+## OOM Prevention Quickstart
+
+No API key. No Worker. No Cloudflare account. Works on first install.
+
+```bash
+pip install ml-memguard[vllm]
+```
+
+```python
+from memory_guard import guard_vllm
+from vllm import LLM
+
+llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", gpu_memory_utilization=0.9)
+safe = guard_vllm(llm)                                         # finds safe max_num_seqs
+safe.monitor.on_shed_load = lambda u: lb.reduce_weight(host, 0)
+
+with safe.monitor.session():
+    server.serve_forever()
+```
+
+---
+
 ## Cost Optimization
 
-memguard watches your inference fleet's true memory footprint over a rolling window, computes the 94th-percentile peak per (source × model) pair, and tells you exactly which GPU tier you can safely downgrade to — and how much that saves per month.
+Once your Worker is deployed and `MEMGUARD_API_URL` is set, memguard watches your inference fleet's true memory footprint over a rolling window, computes the 94th-percentile peak per (source × model) pair, and tells you exactly which GPU tier you can safely downgrade to — and how much that saves per month.
 
 ```
 $ memguard-efficiency --fleet
@@ -36,15 +58,15 @@ dev-serve    phi-3-mini       1×A10G       1×T4            5,218    44%      $
 3 sources · fleet savings: $1,434/mo
 ```
 
-### Quickstart — 3 commands to first insight
+### Quickstart
+
+> Steps 2–3 require a deployed memguard-cloud Worker — complete [memguard-cloud/DEPLOYMENT.md](memguard-cloud/DEPLOYMENT.md) first, then return here.
 
 ```bash
 pip install ml-memguard
 export MEMGUARD_API_KEY=<your-key>  MEMGUARD_API_URL=https://<your-worker>.workers.dev
 memguard-efficiency --fleet
 ```
-
-`MEMGUARD_API_URL` must point to your own deployed Worker — see [memguard-cloud/DEPLOYMENT.md](memguard-cloud/DEPLOYMENT.md).
 
 ### CLI reference
 
