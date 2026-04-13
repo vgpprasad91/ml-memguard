@@ -151,7 +151,10 @@ def _truncate(s: str, width: int) -> str:
 def _format_source(row: Dict[str, Any]) -> str:
     source_id    = _truncate(str(row.get("source_id", "")),    _COL_WIDTHS["source_id"])
     model_name   = _truncate(str(row.get("model_name", "")),   _COL_WIDTHS["model_name"])
-    current_sku  = str(row.get("current_sku") or "unknown")
+    # PR 73: render "4×A10G" for multi-GPU pods (device_count > 1)
+    _sku         = str(row.get("current_sku") or "unknown")
+    _dc          = int(row.get("device_count") or 1)
+    current_sku  = f"{_dc}×{_sku}" if _dc > 1 else _sku
     current_sku  = _truncate(current_sku,                      _COL_WIDTHS["current_sku"])
     recommended  = str(row.get("recommended_sku") or "—")
     recommended  = _truncate(recommended,                      _COL_WIDTHS["recommended"])
