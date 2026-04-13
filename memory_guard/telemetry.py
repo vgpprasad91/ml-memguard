@@ -50,6 +50,24 @@ cuda_graph_mb:
     invisible to KV-utilization gauges.  Snapshotted once at engine startup
     as ``torch.cuda.memory_reserved() − (weights_mb + kvcache_mb)``.
     Zero means "not measured" (non-CUDA backend or PyTorch unavailable).
+
+prefill_peak_activation_mb:
+    Peak transient activation allocation observed during the current
+    telemetry interval (MB).  Computed as
+    ``torch.cuda.memory_allocated() − (weights_mb + kvcache_mb + cuda_graph_mb)``
+    whenever KV velocity is positive (prefill is in progress).  On Linux
+    without PyTorch access, falls back to the eBPF ``mmap_growth_mb``
+    excess over expected KV growth.  Zero means "not measured".
+    This is a running max reset after each upload, not an instantaneous
+    value, so it reflects the worst-case activation spike in the interval.
+
+max_seq_len_in_flight:
+    Approximate peak sequence-length demand in the current batch,
+    computed as ``num_running_seqs × avg_prompt_len`` from the vLLM
+    ``/metrics`` Prometheus endpoint.  Zero when the endpoint is not
+    configured or unreachable.  Long sequences consume disproportionately
+    large activation buffers — 1 request at 128 k tokens can spike
+    activations by several GB.
 """
 
 from __future__ import annotations
@@ -89,6 +107,12 @@ class InferenceTelemetry:
     cuda_graph_mb:
         CUDA graph reservation block in MB (snapshotted once at startup).
         Zero when not measured.
+    prefill_peak_activation_mb:
+        Peak transient activation allocation observed this interval (MB).
+        Running max, reset after each telemetry upload. Zero = not measured.
+    max_seq_len_in_flight:
+        Proxy for peak activation demand: num_running_seqs × avg_prompt_len.
+        Zero when vLLM /metrics endpoint is not configured.
     model_name:
         Serving model identifier (e.g. ``"meta-llama/Llama-3-8B-Instruct"``).
     backend:
@@ -107,8 +131,10 @@ class InferenceTelemetry:
     kvcache_mb:           float = 0.0
     activations_mb:       float = 0.0
     cuda_ctx_mb:          float = 0.0
-    cuda_graph_mb:        float = 0.0
-    model_name:           str   = ""
+    cuda_graph_mb:                float = 0.0
+    prefill_peak_activation_mb:   float = 0.0
+    max_seq_len_in_flight:        int   = 0
+    model_name:                   str   = ""
     backend:              str   = ""
     os_platform:          str   = ""
     # eBPF signals (PR 56) — populated when an ebpf_session is active;
@@ -129,8 +155,10 @@ class InferenceTelemetry:
             "kvcache_mb":           self.kvcache_mb,
             "activations_mb":       self.activations_mb,
             "cuda_ctx_mb":          self.cuda_ctx_mb,
-            "cuda_graph_mb":        self.cuda_graph_mb,
-            "model_name":           self.model_name,
+            "cuda_graph_mb":               self.cuda_graph_mb,
+            "prefill_peak_activation_mb":  self.prefill_peak_activation_mb,
+            "max_seq_len_in_flight":       self.max_seq_len_in_flight,
+            "model_name":                  self.model_name,
             "backend":              self.backend,
             "os_platform":          self.os_platform,
             "memory_pressure_level": self.memory_pressure_level,

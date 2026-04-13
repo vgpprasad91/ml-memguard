@@ -98,6 +98,9 @@ class KVCacheMonitor:
         use_ebpf: bool = False,
         # --- eBPF session (PR 56) — page-fault + mmap probes ---
         ebpf_session: Optional[Any] = None,
+        # --- Prefill activation spike detection (PR 65) ---
+        prefill_spike_threshold_mb: float = 512.0,
+        vllm_metrics_url: str = "",
     ) -> None:
         """
         Args:
@@ -203,6 +206,14 @@ class KVCacheMonitor:
         # CUDA graph memory baseline (PR 64) — snapshotted once at start()
         self._cuda_graph_baseline_mb: float = 0.0
 
+        # Prefill activation spike detection (PR 65)
+        self._prefill_spike_threshold_mb: float = max(0.0, prefill_spike_threshold_mb)
+        self._vllm_metrics_url: str             = vllm_metrics_url
+        # Running max over the current telemetry interval; reset after each upload
+        self._prefill_peak_activation_mb: float = 0.0
+        # Latest value from vLLM /metrics scrape
+        self._max_seq_len_in_flight: int        = 0
+
         # eBPF state (PR 35)
         self._use_ebpf: bool = use_ebpf
         self._ebpf_wake: threading.Event = threading.Event()
@@ -276,6 +287,8 @@ class KVCacheMonitor:
         self._last_telemetry_upload = 0.0
         self._last_predictive_restart = 0.0
         self._last_oom_probability = 0.0
+        self._prefill_peak_activation_mb = 0.0
+        self._max_seq_len_in_flight = 0
         self._stop.clear()
         self._ebpf_wake.clear()
 
@@ -338,6 +351,9 @@ class KVCacheMonitor:
 
             # --- velocity (delta used-blocks / elapsed seconds → MB/s) --
             kv_velocity = self._compute_velocity(used, now)
+
+            # --- prefill activation spike (PR 65) -----------------------
+            self._update_prefill_signals(kv_velocity)
 
             # --- record -------------------------------------------------
             with self._lock:
@@ -466,6 +482,124 @@ class KVCacheMonitor:
         except Exception as exc:
             logger.debug("[memory-guard] CUDA graph snapshot skipped: %s", exc)
 
+    def _update_prefill_signals(self, kv_velocity: float) -> None:
+        """Measure prefill activation spike on each poll tick.
+
+        Updates ``_prefill_peak_activation_mb`` (running max over the current
+        telemetry upload interval, reset to 0 after each upload) and
+        ``_max_seq_len_in_flight`` (latest value from vLLM /metrics).
+
+        Primary path:
+            ``torch.cuda.memory_allocated() − (weights_mb + kvcache_mb + cuda_graph_mb)``
+            Only activated when ``kv_velocity > 0`` (KV cache is growing,
+            i.e. prefill is in progress) so we don't over-count stable phases.
+
+        eBPF fallback (Linux, no PyTorch):
+            If ``mmap_growth_mb`` in this poll interval exceeds the expected
+            KV growth by more than ``prefill_spike_threshold_mb``, the excess
+            is recorded as the activation spike.
+
+        Both paths are best-effort and silently skip on any exception.
+        """
+        try:
+            extra: Dict[str, Any] = {}
+            if self._extended_poll_fn is not None:
+                try:
+                    extra = self._extended_poll_fn() or {}
+                except Exception:
+                    pass
+
+            weights_mb    = float(extra.get("weights_mb",    0.0))
+            kvcache_mb    = float(extra.get("kvcache_mb",    0.0))
+            cuda_graph_mb = float(extra.get("cuda_graph_mb", self._cuda_graph_baseline_mb))
+
+            prefill_mb   = 0.0
+            torch_ok     = False
+
+            # --- primary: torch.cuda.memory_allocated() overhead -----------
+            try:
+                import torch  # type: ignore[import]
+                if torch.cuda.is_available() and kv_velocity > 0:
+                    allocated_mb = torch.cuda.memory_allocated() / (1024.0 * 1024.0)
+                    known_mb     = weights_mb + kvcache_mb + cuda_graph_mb
+                    prefill_mb   = max(0.0, allocated_mb - known_mb)
+                    torch_ok     = True
+            except Exception:
+                pass
+
+            # --- fallback: eBPF mmap_growth excess -------------------------
+            if not torch_ok and (
+                self._ebpf_session is not None
+                and getattr(self._ebpf_session, "available", False)
+            ):
+                mmap_mbps      = float(getattr(self._ebpf_session, "mmap_growth_mbps", 0.0))
+                mmap_growth_mb = mmap_mbps * self.poll_interval
+                expected_kv_mb = max(0.0, kv_velocity * self.poll_interval)
+                excess_mb      = mmap_growth_mb - expected_kv_mb
+                if excess_mb > self._prefill_spike_threshold_mb:
+                    prefill_mb = excess_mb
+
+            # Keep running max (reset to 0 after each telemetry upload)
+            if prefill_mb > self._prefill_peak_activation_mb:
+                self._prefill_peak_activation_mb = prefill_mb
+                logger.debug(
+                    "[memory-guard] prefill spike: %.1f MB (velocity=%.2f MB/s %s)",
+                    prefill_mb, kv_velocity, "torch" if torch_ok else "ebpf",
+                )
+
+            # --- max_seq_len_in_flight from vLLM /metrics ------------------
+            if self._vllm_metrics_url:
+                seq_len = self._fetch_max_seq_len_in_flight()
+                if seq_len > 0:
+                    self._max_seq_len_in_flight = seq_len
+
+        except Exception as exc:
+            logger.debug("[memory-guard] _update_prefill_signals raised: %s", exc)
+
+    def _fetch_max_seq_len_in_flight(self) -> int:
+        """Scrape vLLM /metrics for ``num_running_seqs × avg_prompt_len``.
+
+        Parses the Prometheus text exposition format emitted by the vLLM
+        OpenAI-compatible server at ``/metrics``.  Returns 0 on any failure
+        (connection refused, timeout, parse error) — callers must treat 0 as
+        "not measured".
+
+        The product of running sequences × average prompt length is a proxy
+        for peak activation memory demand: a single 128k-token request can
+        spike activations by several GB while prefill computes attention.
+        """
+        try:
+            import urllib.request
+            with urllib.request.urlopen(self._vllm_metrics_url, timeout=2) as resp:
+                text = resp.read().decode("utf-8", errors="replace")
+
+            num_running: float = 0.0
+            avg_prompt:  float = 0.0
+            for line in text.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                # Prometheus text: metric_name{labels} value [timestamp]
+                # We match by prefix (labels may vary)
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                metric_part = parts[0]
+                value_str   = parts[1]   # value is always index 1
+                try:
+                    value = float(value_str)
+                except ValueError:
+                    continue
+                if metric_part.startswith("vllm:num_running_seqs"):
+                    num_running = value
+                elif metric_part.startswith("vllm:avg_prompt_len"):
+                    avg_prompt = value
+
+            return int(num_running * avg_prompt)
+        except Exception as exc:
+            logger.debug("[memory-guard] _fetch_max_seq_len_in_flight: %s", exc)
+            return 0
+
     def _run_predict_oom(
         self,
         kv_velocity: float,
@@ -499,9 +633,11 @@ class KVCacheMonitor:
                 "avg_seq_len":         float(extra.get("avg_seq_len", 0.0)),
                 "near_miss_count":     int(extra.get("near_miss_count", 0)),
                 "preemption_count":    int(extra.get("preemption_count", 0)),
-                "weights_mb":          float(extra.get("weights_mb", 0.0)),
-                "kvcache_mb":          float(extra.get("kvcache_mb", 0.0)),
-                "cuda_graph_mb":       float(extra.get("cuda_graph_mb", self._cuda_graph_baseline_mb)),
+                "weights_mb":                 float(extra.get("weights_mb", 0.0)),
+                "kvcache_mb":                 float(extra.get("kvcache_mb", 0.0)),
+                "cuda_graph_mb":              float(extra.get("cuda_graph_mb", self._cuda_graph_baseline_mb)),
+                "prefill_peak_activation_mb": self._prefill_peak_activation_mb,
+                "max_seq_len_in_flight":      self._max_seq_len_in_flight,
             }
 
             # Merge BPF-derived signals into the predict payload (PR 56)
@@ -611,23 +747,29 @@ class KVCacheMonitor:
                     / (1024 * 1024)
                 )
 
+            # Snapshot running max and reset so the next interval starts fresh
+            prefill_mb = self._prefill_peak_activation_mb
+            self._prefill_peak_activation_mb = 0.0
+
             signals = InferenceTelemetry(
-                kv_velocity_mbps      = kv_velocity,
-                fragmentation_ratio   = float(extra.get("fragmentation_ratio", 0.0)),
-                eviction_rate         = float(extra.get("eviction_rate", 0.0)),
-                avg_seq_len           = float(extra.get("avg_seq_len", 0.0)),
-                near_miss_count       = int(extra.get("near_miss_count", 0)),
-                preemption_count      = int(extra.get("preemption_count", 0)),
-                weights_mb            = float(extra.get("weights_mb", 0.0)),
-                kvcache_mb            = float(extra.get("kvcache_mb", 0.0)),
-                activations_mb        = float(extra.get("activations_mb", 0.0)),
-                cuda_ctx_mb           = float(extra.get("cuda_ctx_mb", 0.0)),
-                cuda_graph_mb         = float(extra.get("cuda_graph_mb", self._cuda_graph_baseline_mb)),
-                model_name            = self._telemetry_model_name,
-                backend               = self._telemetry_backend,
-                os_platform           = self._telemetry_os_platform,
-                memory_pressure_level = bpf_pressure_mb,
-                page_fault_rate       = bpf_page_fault_rate,
+                kv_velocity_mbps           = kv_velocity,
+                fragmentation_ratio        = float(extra.get("fragmentation_ratio", 0.0)),
+                eviction_rate              = float(extra.get("eviction_rate", 0.0)),
+                avg_seq_len                = float(extra.get("avg_seq_len", 0.0)),
+                near_miss_count            = int(extra.get("near_miss_count", 0)),
+                preemption_count           = int(extra.get("preemption_count", 0)),
+                weights_mb                 = float(extra.get("weights_mb", 0.0)),
+                kvcache_mb                 = float(extra.get("kvcache_mb", 0.0)),
+                activations_mb             = float(extra.get("activations_mb", 0.0)),
+                cuda_ctx_mb                = float(extra.get("cuda_ctx_mb", 0.0)),
+                cuda_graph_mb              = float(extra.get("cuda_graph_mb", self._cuda_graph_baseline_mb)),
+                prefill_peak_activation_mb = prefill_mb,
+                max_seq_len_in_flight      = self._max_seq_len_in_flight,
+                model_name                 = self._telemetry_model_name,
+                backend                    = self._telemetry_backend,
+                os_platform                = self._telemetry_os_platform,
+                memory_pressure_level      = bpf_pressure_mb,
+                page_fault_rate            = bpf_page_fault_rate,
             )
             _upload_signals(signals)
         except Exception as exc:

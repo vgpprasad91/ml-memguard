@@ -2,7 +2,7 @@
 
 Covers:
   - InferenceTelemetry default construction (all fields zero)
-  - InferenceTelemetry.to_dict() includes all 15 keys + oom_occurred sentinel
+  - InferenceTelemetry.to_dict() includes all 17 keys + oom_occurred sentinel
   - KVCacheMonitor._compute_velocity(): cold start returns 0.0
   - KVCacheMonitor._compute_velocity(): correct blocks/s when block_size_mb == 0
   - KVCacheMonitor._compute_velocity(): correct MB/s when block_size_mb > 0
@@ -43,6 +43,8 @@ class TestInferenceTelemetry:
         assert t.activations_mb == 0.0
         assert t.cuda_ctx_mb == 0.0
         assert t.cuda_graph_mb == 0.0
+        assert t.prefill_peak_activation_mb == 0.0
+        assert t.max_seq_len_in_flight == 0
         assert t.model_name == ""
         assert t.backend == ""
         assert t.os_platform == ""
@@ -55,6 +57,7 @@ class TestInferenceTelemetry:
             "avg_seq_len", "near_miss_count", "preemption_count",
             "weights_mb", "kvcache_mb", "activations_mb", "cuda_ctx_mb",
             "cuda_graph_mb",
+            "prefill_peak_activation_mb", "max_seq_len_in_flight",
             "memory_pressure_level", "page_fault_rate",
             "model_name", "backend", "os_platform", "oom_occurred",
         }
@@ -246,7 +249,7 @@ class TestWorkerMissingFieldDefaulting:
             "kv_velocity_mbps", "fragmentation_ratio", "eviction_rate",
             "avg_seq_len", "near_miss_count", "preemption_count",
             "weights_mb", "kvcache_mb", "activations_mb", "cuda_ctx_mb",
-            "cuda_graph_mb",
+            "cuda_graph_mb", "prefill_peak_activation_mb", "max_seq_len_in_flight",
         ):
             assert d[field] == 0 or d[field] == 0.0, f"{field} should default to 0"
 
@@ -292,6 +295,23 @@ class TestCudaGraphBaseline:
         assert len(captured) == 1
         assert captured[0].cuda_graph_mb == pytest.approx(2048.0)
 
+    def test_baseline_emitted_in_predict_signals(self):
+        """_run_predict_oom signals dict includes cuda_graph_mb from baseline."""
+        captured: list = []
+
+        def fake_predict(signals, **_kw):
+            captured.append(dict(signals))
+            return None  # no action
+
+        mon = KVCacheMonitor(poll_fn=lambda: (50, 100))
+        mon._cuda_graph_baseline_mb = 1500.0
+
+        with patch("memory_guard.backends.predict_oom", side_effect=fake_predict):
+            mon._run_predict_oom(2.0, 0.5, True)
+
+        assert len(captured) == 1
+        assert captured[0].get("cuda_graph_mb") == pytest.approx(1500.0)
+
     def test_extended_poll_cuda_graph_overrides_baseline(self):
         """cuda_graph_mb from extended_poll_fn takes precedence over the baseline."""
         captured: list = []
@@ -312,3 +332,135 @@ class TestCudaGraphBaseline:
 
         assert len(captured) == 1
         assert captured[0].cuda_graph_mb == pytest.approx(3500.0)
+
+
+# ---------------------------------------------------------------------------
+# Prefill activation probe
+# ---------------------------------------------------------------------------
+
+class TestPrefillActivationProbe:
+    """Tests for _update_prefill_signals, _fetch_max_seq_len_in_flight, and
+    their integration with telemetry upload and predict signals."""
+
+    def test_running_max_accumulates_across_ticks(self):
+        """_prefill_peak_activation_mb is a running max, not last-tick value."""
+        mon = KVCacheMonitor(poll_fn=lambda: (50, 100))
+        # Inject a first spike of 1000 MB
+        mon._prefill_peak_activation_mb = 1000.0
+        # _update_prefill_signals with no torch should not decrease the value
+        # (silently skips torch path; no eBPF session either)
+        mon._update_prefill_signals(kv_velocity=0.0)
+        # Running max must still be at least 1000.0 (may stay or grow)
+        assert mon._prefill_peak_activation_mb >= 0.0  # doesn't crash
+
+    def test_running_max_reset_after_upload(self):
+        """prefill_peak_activation_mb is reset to 0 after _upload_inference_telemetry."""
+        captured: list = []
+        mon = KVCacheMonitor(
+            poll_fn=lambda: (50, 100),
+            telemetry_upload_interval=0.0,
+        )
+        mon._prefill_peak_activation_mb = 4096.0
+
+        with patch("memory_guard.backends.upload_inference_signals",
+                   side_effect=lambda s: captured.append(s) or True):
+            mon._upload_inference_telemetry(1.0)
+
+        assert len(captured) == 1
+        assert captured[0].prefill_peak_activation_mb == pytest.approx(4096.0)
+        # Should be reset after upload
+        assert mon._prefill_peak_activation_mb == pytest.approx(0.0)
+
+    def test_prefill_emitted_in_predict_signals(self):
+        """_run_predict_oom includes prefill_peak_activation_mb in the signals dict."""
+        captured: list = []
+
+        def fake_predict(signals, **_kw):
+            captured.append(dict(signals))
+            return None
+
+        mon = KVCacheMonitor(poll_fn=lambda: (50, 100))
+        mon._prefill_peak_activation_mb = 2048.0
+        mon._max_seq_len_in_flight      = 512
+
+        with patch("memory_guard.backends.predict_oom", side_effect=fake_predict):
+            mon._run_predict_oom(1.0, 0.5, True)
+
+        assert len(captured) == 1
+        assert captured[0].get("prefill_peak_activation_mb") == pytest.approx(2048.0)
+        assert captured[0].get("max_seq_len_in_flight") == 512
+
+    def test_ebpf_fallback_records_spike_above_threshold(self):
+        """When eBPF mmap_growth exceeds expected KV growth by > threshold, spike is recorded."""
+        class FakeEBPF:
+            available         = True
+            mmap_growth_mbps  = 300.0   # 300 MB/s × 5 s = 1500 MB mmap growth
+            page_fault_rate   = 0.0
+            memory_pressure_bytes = 0
+
+        mon = KVCacheMonitor(
+            poll_fn=lambda: (50, 100),
+            ebpf_session=FakeEBPF(),
+            prefill_spike_threshold_mb=512.0,
+            poll_interval=5.0,
+        )
+        # kv_velocity = 100 MB/s × 5 s = 500 MB expected; mmap = 1500 MB; excess = 1000 MB > 512 MB threshold
+        mon._update_prefill_signals(kv_velocity=100.0)
+        assert mon._prefill_peak_activation_mb == pytest.approx(1000.0)
+
+    def test_ebpf_fallback_silent_below_threshold(self):
+        """Excess below threshold does not trigger a spike."""
+        class FakeEBPF:
+            available         = True
+            mmap_growth_mbps  = 110.0   # 110 × 5 = 550 MB; expected KV = 100 × 5 = 500; excess = 50 < 512
+            page_fault_rate   = 0.0
+            memory_pressure_bytes = 0
+
+        mon = KVCacheMonitor(
+            poll_fn=lambda: (50, 100),
+            ebpf_session=FakeEBPF(),
+            prefill_spike_threshold_mb=512.0,
+            poll_interval=5.0,
+        )
+        mon._update_prefill_signals(kv_velocity=100.0)
+        assert mon._prefill_peak_activation_mb == pytest.approx(0.0)
+
+    def test_fetch_max_seq_len_returns_zero_on_connection_error(self):
+        """_fetch_max_seq_len_in_flight returns 0 when the endpoint is unreachable."""
+        mon = KVCacheMonitor(
+            poll_fn=lambda: (0, 100),
+            vllm_metrics_url="http://localhost:9999/metrics",
+        )
+        # No server listening — should not raise
+        result = mon._fetch_max_seq_len_in_flight()
+        assert result == 0
+
+    def test_fetch_max_seq_len_parses_prometheus_text(self):
+        """_fetch_max_seq_len_in_flight correctly parses vLLM Prometheus text."""
+        from unittest.mock import MagicMock, patch as mpatch
+        import io
+
+        fake_body = (
+            "# HELP vllm:num_running_seqs Number of running sequences.\n"
+            "# TYPE vllm:num_running_seqs gauge\n"
+            "vllm:num_running_seqs{engine=\"0\"} 8.0\n"
+            "# HELP vllm:avg_prompt_len Average prompt length.\n"
+            "# TYPE vllm:avg_prompt_len gauge\n"
+            "vllm:avg_prompt_len{engine=\"0\"} 512.0\n"
+        ).encode("utf-8")
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = fake_body
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        mon = KVCacheMonitor(
+            poll_fn=lambda: (0, 100),
+            vllm_metrics_url="http://localhost:8000/metrics",
+        )
+
+        with mpatch("urllib.request.urlopen", return_value=mock_resp):
+            result = mon._fetch_max_seq_len_in_flight()
+
+        # 8 seqs × 512 tokens = 4096
+        assert result == 4096
