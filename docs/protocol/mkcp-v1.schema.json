@@ -1,0 +1,201 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://memguard.io/protocol/mkcp-v1.schema.json",
+  "title": "MemGuard KV Cache Protocol (MKCP) payload — v1.0.0",
+  "description": "Schema for a single MKCP telemetry record emitted by an inference engine sidecar.",
+  "type": "object",
+  "required": ["mkcp_version", "ts", "source_id", "runtime", "metrics"],
+  "additionalProperties": false,
+  "properties": {
+    "mkcp_version": {
+      "type": "string",
+      "description": "MKCP spec version used by this emitter (semver, e.g. '1.0.0').",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "examples": ["1.0.0"]
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp of the measurement. Payloads older than 5 minutes are rejected by the ingest endpoint."
+    },
+    "source_id": {
+      "type": "string",
+      "description": "Informational identifier for the emitting process or pod (e.g. 'pod/vllm-prod-abc123', 'host/gpu-node-07').",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "runtime": {
+      "type": "string",
+      "description": "Execution environment detected by the emitter.",
+      "enum": ["kubernetes", "docker", "container", "host"],
+      "examples": ["kubernetes"]
+    },
+    "model_name": {
+      "type": "string",
+      "description": "HuggingFace model identifier or custom name for the model being served.",
+      "examples": ["meta-llama/Llama-3-70B-Instruct"]
+    },
+    "backend": {
+      "type": "string",
+      "description": "Hardware backend string.",
+      "examples": ["cuda", "metal", "cpu", "rocm"]
+    },
+    "metrics": {
+      "type": "object",
+      "description": "The eight canonical MKCP metric values for this poll cycle. Unknown fields are ignored by v1 consumers.",
+      "additionalProperties": true,
+      "properties": {
+        "kvcache.utilization": {
+          "type": "number",
+          "description": "Fraction of KV cache blocks currently allocated. Range: [0.0, 1.0].",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "examples": [0.74]
+        },
+        "kvcache.allocation_velocity_mbps": {
+          "type": "number",
+          "description": "Rate of KV cache growth over the last poll interval, in MB/s. Zero means stable or shrinking.",
+          "minimum": 0.0,
+          "examples": [18.3]
+        },
+        "kvcache.eviction_rate": {
+          "type": "number",
+          "description": "Rate of scheduler block evictions per second. Non-zero at moderate utilisation indicates memory pressure.",
+          "minimum": 0.0,
+          "examples": [0.0, 2.4]
+        },
+        "kvcache.fragmentation_ratio": {
+          "type": "number",
+          "description": "Fraction of KV cache blocks that are allocated but not part of a contiguous free region. Range: [0.0, 1.0].",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "examples": [0.11]
+        },
+        "memory.pressure_level": {
+          "type": "number",
+          "description": "OS-level cgroup memory pressure in MB above the high-watermark. Zero if eBPF probes are not active.",
+          "minimum": 0.0,
+          "examples": [0.0, 512.0]
+        },
+        "memory.oom_risk_score": {
+          "type": "number",
+          "description": "GBT model probability of OOM in the next 30-120 seconds, as returned by POST /v1/predict. Range: [0.0, 1.0]. Zero if memguard-cloud is not configured.",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "examples": [0.42, 0.71]
+        },
+        "memory.near_miss_count": {
+          "type": "integer",
+          "description": "Cumulative GPU allocations that succeeded with less than the headroom threshold (default: 512 MB) remaining. Requires memguard-allocator. Zero without the custom allocator.",
+          "minimum": 0,
+          "examples": [0, 3, 17]
+        },
+        "scheduler.preemption_rate": {
+          "type": "number",
+          "description": "Scheduler request preemptions per second. Distinct from kvcache.eviction_rate — one preemption may cause multiple block evictions.",
+          "minimum": 0.0,
+          "examples": [0.0, 0.5]
+        }
+      }
+    },
+    "event": {
+      "oneOf": [
+        {
+          "type": "null",
+          "description": "No threshold-crossing event in this poll cycle."
+        },
+        {
+          "type": "object",
+          "description": "A discrete state-transition event that occurred during this poll cycle.",
+          "required": ["type", "triggered_by", "value", "threshold"],
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "description": "Event classification.",
+              "enum": ["warn", "shed_load", "critical_restart"],
+              "examples": ["shed_load"]
+            },
+            "triggered_by": {
+              "type": "string",
+              "description": "The MKCP metric name whose threshold crossing triggered this event.",
+              "examples": ["memory.oom_risk_score", "kvcache.utilization"]
+            },
+            "value": {
+              "type": "number",
+              "description": "The metric value at the moment of threshold crossing."
+            },
+            "threshold": {
+              "type": "number",
+              "description": "The configured threshold that was crossed."
+            }
+          }
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "batch_payload": {
+      "type": "object",
+      "description": "Batch wrapper for up to 100 MKCP records in a single POST.",
+      "required": ["batch"],
+      "additionalProperties": false,
+      "properties": {
+        "batch": {
+          "type": "array",
+          "description": "Array of MKCP records. Maximum 100 per request.",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": {
+            "$ref": "#"
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "mkcp_version": "1.0.0",
+      "ts": "2026-04-12T10:00:00.000Z",
+      "source_id": "pod/vllm-prod-abc123",
+      "runtime": "kubernetes",
+      "model_name": "meta-llama/Llama-3-70B-Instruct",
+      "backend": "cuda",
+      "metrics": {
+        "kvcache.utilization": 0.74,
+        "kvcache.allocation_velocity_mbps": 18.3,
+        "kvcache.eviction_rate": 0.0,
+        "kvcache.fragmentation_ratio": 0.11,
+        "memory.pressure_level": 0.0,
+        "memory.oom_risk_score": 0.42,
+        "memory.near_miss_count": 3,
+        "scheduler.preemption_rate": 0.0
+      },
+      "event": null
+    },
+    {
+      "mkcp_version": "1.0.0",
+      "ts": "2026-04-12T10:05:37.821Z",
+      "source_id": "pod/vllm-prod-abc123",
+      "runtime": "kubernetes",
+      "model_name": "meta-llama/Llama-3-70B-Instruct",
+      "backend": "cuda",
+      "metrics": {
+        "kvcache.utilization": 0.89,
+        "kvcache.allocation_velocity_mbps": 47.1,
+        "kvcache.eviction_rate": 2.4,
+        "kvcache.fragmentation_ratio": 0.28,
+        "memory.pressure_level": 0.0,
+        "memory.oom_risk_score": 0.71,
+        "memory.near_miss_count": 17,
+        "scheduler.preemption_rate": 0.5
+      },
+      "event": {
+        "type": "shed_load",
+        "triggered_by": "memory.oom_risk_score",
+        "value": 0.71,
+        "threshold": 0.70
+      }
+    }
+  ]
+}

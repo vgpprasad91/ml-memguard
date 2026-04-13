@@ -1,0 +1,200 @@
+// MemGuard KV Cache Protocol (MKCP) — Protobuf schema v1.0.0
+//
+// Binary-efficient alternative to the JSON wire format for high-throughput
+// inference servers where JSON serialisation overhead is measurable.
+//
+// Usage:
+//   protoc --python_out=. --grpc_python_out=. mkcp-v1.proto
+//
+// The JSON wire format (mkcp-v1.schema.json) and this Protobuf schema are
+// kept in sync.  Field numbers are stable within MKCP v1 — new fields may
+// be appended but existing field numbers will not be reused.
+//
+// Wire format selection:
+//   JSON   → Content-Type: application/json
+//   Proto  → Content-Type: application/x-protobuf
+//
+// Both formats are accepted by the memguard-cloud ingest endpoint.
+
+syntax = "proto3";
+
+package memguard.mkcp.v1;
+
+option java_package = "io.memguard.mkcp.v1";
+option java_multiple_files = true;
+option go_package = "github.com/memguard/mkcp/v1;mkcpv1";
+
+// ---------------------------------------------------------------------------
+// Core record
+// ---------------------------------------------------------------------------
+
+// MKCPRecord is the top-level message for a single MKCP telemetry payload.
+// Emitters POST one record per poll cycle (typically every 5 seconds).
+message MKCPRecord {
+  // MKCP spec version used by this emitter.  Must be "1.0.0" for v1 payloads.
+  string mkcp_version = 1;
+
+  // RFC 3339 timestamp of the measurement.
+  // Payloads older than 5 minutes are rejected by the ingest endpoint.
+  string ts = 2;
+
+  // Informational identifier for the emitting process or pod.
+  // Examples: "pod/vllm-prod-abc123", "host/gpu-node-07"
+  string source_id = 3;
+
+  // Execution environment detected by the emitter.
+  Runtime runtime = 4;
+
+  // HuggingFace model identifier or custom name.
+  string model_name = 5;
+
+  // Hardware backend string ("cuda", "metal", "cpu", "rocm").
+  string backend = 6;
+
+  // The eight canonical MKCP metric values for this poll cycle.
+  Metrics metrics = 7;
+
+  // Discrete state-transition event, if a threshold was crossed this cycle.
+  // Unset (default) means no event occurred.
+  Event event = 8;
+}
+
+// ---------------------------------------------------------------------------
+// Runtime enum
+// ---------------------------------------------------------------------------
+
+enum Runtime {
+  RUNTIME_UNSPECIFIED = 0;
+  RUNTIME_KUBERNETES  = 1;
+  RUNTIME_DOCKER      = 2;
+  RUNTIME_CONTAINER   = 3;
+  RUNTIME_HOST        = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Metrics message — the eight canonical MKCP signals
+// ---------------------------------------------------------------------------
+
+message Metrics {
+  // kvcache.utilization
+  // Fraction of KV cache blocks currently allocated.  Range: [0.0, 1.0].
+  double kvcache_utilization = 1;
+
+  // kvcache.allocation_velocity_mbps
+  // Rate of KV cache growth in MB/s over the last poll interval.
+  // Zero means the cache is stable or shrinking.
+  double kvcache_allocation_velocity_mbps = 2;
+
+  // kvcache.eviction_rate
+  // Scheduler block evictions per second.
+  // Non-zero at moderate utilisation indicates active memory pressure.
+  double kvcache_eviction_rate = 3;
+
+  // kvcache.fragmentation_ratio
+  // Fraction of KV cache blocks that are allocated but not contiguous.
+  // Range: [0.0, 1.0].  Engines can OOM at < 70 % utilisation when
+  // fragmentation prevents a large contiguous allocation.
+  double kvcache_fragmentation_ratio = 4;
+
+  // memory.pressure_level
+  // OS-level cgroup memory pressure in MB above the high-watermark.
+  // Zero when eBPF probes are not active (non-Linux or no CAP_BPF).
+  double memory_pressure_level = 5;
+
+  // memory.oom_risk_score
+  // GBT model probability of OOM in the next 30-120 seconds.
+  // Range: [0.0, 1.0].  Zero when memguard-cloud is not configured.
+  double memory_oom_risk_score = 6;
+
+  // memory.near_miss_count
+  // Cumulative GPU allocations that succeeded with < headroom_mb remaining.
+  // Requires memguard-allocator.  Zero without the custom allocator.
+  int64 memory_near_miss_count = 7;
+
+  // scheduler.preemption_rate
+  // Scheduler request preemptions per second.
+  // Distinct from kvcache_eviction_rate — one preemption causes N evictions.
+  double scheduler_preemption_rate = 8;
+}
+
+// ---------------------------------------------------------------------------
+// Event message — discrete state-transition events
+// ---------------------------------------------------------------------------
+
+message Event {
+  // Event classification.
+  EventType type = 1;
+
+  // The MKCP metric name whose threshold crossing triggered this event.
+  // Example: "memory.oom_risk_score"
+  string triggered_by = 2;
+
+  // The metric value at the moment of threshold crossing.
+  double value = 3;
+
+  // The configured threshold that was crossed.
+  double threshold = 4;
+}
+
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED    = 0;
+
+  // Elevated risk; no traffic changes.  Consumers should alert.
+  EVENT_TYPE_WARN           = 1;
+
+  // OOM risk exceeds shed threshold.  Sidecar returns HTTP 503 from /readyz.
+  // Kubernetes stops routing new requests to this pod.
+  EVENT_TYPE_SHED_LOAD      = 2;
+
+  // VLLMWatchdog is initiating a graceful restart sequence.
+  // Pod will become unavailable within ~60 seconds.
+  EVENT_TYPE_CRITICAL_RESTART = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Batch wrapper — up to 100 records per POST
+// ---------------------------------------------------------------------------
+
+message MKCPBatch {
+  repeated MKCPRecord records = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Ingest service (optional gRPC transport)
+// ---------------------------------------------------------------------------
+
+// MKCPIngestService is an optional gRPC alternative to the HTTP JSON/protobuf
+// endpoint.  Both transports are functionally equivalent.
+service MKCPIngestService {
+  // Ingest a single MKCP record.
+  rpc Ingest(MKCPRecord) returns (IngestResponse);
+
+  // Ingest a batch of up to 100 MKCP records.
+  rpc IngestBatch(MKCPBatch) returns (IngestResponse);
+
+  // Server-streaming: subscribe to processed event notifications.
+  // The server emits an EventNotification whenever an ingested record
+  // triggers a shed_load or critical_restart event.
+  rpc Subscribe(SubscribeRequest) returns (stream EventNotification);
+}
+
+message IngestResponse {
+  bool ok = 1;
+  string ingested_at = 2;   // RFC 3339 timestamp of server receipt
+  string error = 3;         // Non-empty only on failure
+}
+
+message SubscribeRequest {
+  // Filter to events from a specific source_id prefix.  Empty = all sources.
+  string source_id_prefix = 1;
+
+  // Minimum event type to receive.  WARN receives all; SHED_LOAD skips warns.
+  EventType min_event_type = 2;
+}
+
+message EventNotification {
+  string source_id  = 1;
+  string ts         = 2;
+  Event  event      = 3;
+  double oom_risk   = 4;   // memory.oom_risk_score at event time
+}
