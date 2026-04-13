@@ -68,6 +68,21 @@ max_seq_len_in_flight:
     configured or unreachable.  Long sequences consume disproportionately
     large activation buffers — 1 request at 128 k tokens can spike
     activations by several GB.
+
+total_peak_mb:
+    High-water mark of ``torch.cuda.memory_allocated() / 1024**2``
+    observed across all poll ticks within the current upload interval.
+    Running maximum — reset to 0 after each telemetry upload.  Zero
+    means "not measured" (PyTorch unavailable or CUDA absent).
+    Numerator for per-interval efficiency scoring:
+    ``total_peak_mb / reserved_vram_mb``.
+
+reserved_vram_mb:
+    Total physical GPU VRAM in MB, from
+    ``torch.cuda.get_device_properties(0).total_memory / 1024**2``.
+    Snapshotted once at engine startup.  Static across the lifetime of
+    the monitor.  Denominator for efficiency scoring.  Zero means
+    "not measured" (PyTorch unavailable).
 """
 
 from __future__ import annotations
@@ -113,6 +128,12 @@ class InferenceTelemetry:
     max_seq_len_in_flight:
         Proxy for peak activation demand: num_running_seqs × avg_prompt_len.
         Zero when vLLM /metrics endpoint is not configured.
+    total_peak_mb:
+        High-water mark of torch.cuda.memory_allocated() within this interval (MB).
+        Running max, reset after each upload. Zero = not measured.
+    reserved_vram_mb:
+        Total physical GPU VRAM in MB from torch.cuda.get_device_properties(0).
+        Static across the monitor lifetime. Zero = not measured.
     model_name:
         Serving model identifier (e.g. ``"meta-llama/Llama-3-8B-Instruct"``).
     backend:
@@ -134,6 +155,8 @@ class InferenceTelemetry:
     cuda_graph_mb:                float = 0.0
     prefill_peak_activation_mb:   float = 0.0
     max_seq_len_in_flight:        int   = 0
+    total_peak_mb:                float = 0.0
+    reserved_vram_mb:             float = 0.0
     model_name:                   str   = ""
     backend:              str   = ""
     os_platform:          str   = ""
@@ -158,6 +181,8 @@ class InferenceTelemetry:
             "cuda_graph_mb":               self.cuda_graph_mb,
             "prefill_peak_activation_mb":  self.prefill_peak_activation_mb,
             "max_seq_len_in_flight":       self.max_seq_len_in_flight,
+            "total_peak_mb":               self.total_peak_mb,
+            "reserved_vram_mb":            self.reserved_vram_mb,
             "model_name":                  self.model_name,
             "backend":              self.backend,
             "os_platform":          self.os_platform,
