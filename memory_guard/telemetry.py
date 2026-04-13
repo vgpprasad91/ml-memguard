@@ -140,6 +140,13 @@ class InferenceTelemetry:
         Inference backend string (``"cuda"``, ``"metal"``, ``"cpu"`` …).
     os_platform:
         Platform string (``"linux"``, ``"darwin"`` …).
+    device_count:
+        Number of visible CUDA devices at monitor startup.  1 = single-GPU
+        (default and fallback when PyTorch is unavailable).  N > 1 indicates
+        a tensor-parallel pod where ``reserved_vram_mb`` is the *sum* across
+        all N devices (e.g., 4 × 24,576 = 98,304 MB for a 4×A10G node).
+        Used by the efficiency engine to look up the correct multi-GPU catalog
+        SKU rather than matching against single-GPU entries.
     """
 
     kv_velocity_mbps:    float = 0.0
@@ -164,6 +171,10 @@ class InferenceTelemetry:
     # zero means "not measured" (no eBPF), not "zero pressure".
     memory_pressure_level: float = 0.0
     page_fault_rate:       float = 0.0
+    # PR 72: number of visible CUDA devices (tensor-parallel pool size).
+    # 1 = single-GPU (default); N > 1 = multi-GPU NVLink/SXM pod.
+    # Combined reserved_vram_mb = per-device VRAM × device_count.
+    device_count:          int   = 1
 
     def to_dict(self) -> dict:
         """Return a JSON-serialisable dict for the telemetry POST body."""
@@ -188,6 +199,8 @@ class InferenceTelemetry:
             "os_platform":          self.os_platform,
             "memory_pressure_level": self.memory_pressure_level,
             "page_fault_rate":      self.page_fault_rate,
+            # PR 72: multi-GPU topology — 1 for single-GPU pods
+            "device_count":         self.device_count,
             # Required by the runs schema; inference telemetry rows are not OOM events
             "oom_occurred":         0,
         }

@@ -220,9 +220,11 @@ class KVCacheMonitor:
         # Source baseline (PR 67) — posted once at start()
         self._source_id: str            = source_id
         self._total_vram_mb: float      = max(0.0, total_vram_mb)
-        # PR 68: physical GPU VRAM (torch.cuda.get_device_properties(0).total_memory)
+        # PR 68: physical GPU VRAM — sum across all visible devices (PR 72).
         # snapshotted once at start(); falls back to _total_vram_mb when torch absent.
         self._reserved_vram_mb: float   = 0.0
+        # PR 72: number of visible CUDA devices at start(); 1 on single-GPU / non-CUDA.
+        self._device_count: int         = 1
         # PR 68: running max of torch.cuda.memory_allocated() across poll ticks;
         # reset to 0 after each telemetry upload.
         self._total_peak_mb: float      = 0.0
@@ -519,27 +521,47 @@ class KVCacheMonitor:
             logger.debug("[memory-guard] CUDA graph snapshot skipped: %s", exc)
 
     def _snapshot_reserved_vram(self) -> None:
-        """Snapshot total physical GPU VRAM from the CUDA driver.
+        """Snapshot total physical GPU VRAM across *all* visible CUDA devices.
 
         Stored in ``_reserved_vram_mb`` and emitted in every telemetry upload
-        as the denominator for efficiency scoring.
+        as the denominator for efficiency scoring.  The number of devices is
+        stored in ``_device_count`` and forwarded in the source baseline POST
+        so the Worker can match the combined pool against multi-GPU catalog
+        entries (e.g., 4×A10G = 98,304 MB).
 
-        Source: ``torch.cuda.get_device_properties(0).total_memory / 1024**2``
+        PR 72 fix: sum ``total_memory`` across ``torch.cuda.device_count()``
+        devices instead of reading device 0 only.  On a 4×A10G node the
+        previous implementation recorded 24,576 MB (one card) rather than
+        98,304 MB (the full tensor-parallel pool), causing the efficiency
+        engine to match the single-A10G catalog tier and miss the correct
+        4×A10G → 2×A10G recommendation.
+
         Falls back to the ``total_vram_mb`` constructor param when PyTorch or
-        CUDA is unavailable.  If neither is available, stays at 0.0.
+        CUDA is unavailable.  If neither is available, stays at 0.0 /
+        device_count stays at 1.
         """
         try:
             import torch  # type: ignore[import]
-            props = torch.cuda.get_device_properties(0)
-            self._reserved_vram_mb = props.total_memory / (1024.0 * 1024.0)
+            n = max(1, torch.cuda.device_count())
+            total_bytes = sum(
+                torch.cuda.get_device_properties(i).total_memory
+                for i in range(n)
+            )
+            self._reserved_vram_mb = total_bytes / (1024.0 * 1024.0)
+            self._device_count     = n
             logger.debug(
-                "[memory-guard] reserved_vram_mb: %.0f MB (device: %s)",
+                "[memory-guard] reserved_vram_mb: %.0f MB (%d device(s): %s)",
                 self._reserved_vram_mb,
-                getattr(props, "name", "?"),
+                n,
+                ", ".join(
+                    getattr(torch.cuda.get_device_properties(i), "name", "?")
+                    for i in range(n)
+                ),
             )
         except Exception:
             # Fall back to user-provided value (may be 0.0 when not set)
             self._reserved_vram_mb = self._total_vram_mb
+            self._device_count     = 1
 
     def _update_prefill_signals(self, kv_velocity: float) -> None:
         """Measure prefill activation spike on each poll tick.
@@ -797,13 +819,18 @@ class KVCacheMonitor:
                 "weights_mb":       float(extra.get("weights_mb",  0.0)),
                 "cuda_ctx_mb":      float(extra.get("cuda_ctx_mb", 0.0)),
                 "cuda_graph_mb":    self._cuda_graph_baseline_mb,
+                # PR 72: multi-GPU topology — lets the Worker store device count
+                # alongside the combined VRAM and look up the correct catalog SKU
+                "device_count":     self._device_count,
             }
             _upload_baseline(baseline)
             logger.debug(
                 "[memory-guard] Source baseline posted: source_id=%r "
-                "reserved_vram=%.0fMB weights=%.0fMB cuda_ctx=%.0fMB cuda_graph=%.0fMB",
+                "reserved_vram=%.0fMB device_count=%d "
+                "weights=%.0fMB cuda_ctx=%.0fMB cuda_graph=%.0fMB",
                 self._source_id,
                 self._reserved_vram_mb,
+                self._device_count,
                 baseline["weights_mb"],
                 baseline["cuda_ctx_mb"],
                 baseline["cuda_graph_mb"],
@@ -889,6 +916,8 @@ class KVCacheMonitor:
                 os_platform                = self._telemetry_os_platform,
                 memory_pressure_level      = bpf_pressure_mb,
                 page_fault_rate            = bpf_page_fault_rate,
+                # PR 72: multi-GPU device count; 1 = single-GPU (default)
+                device_count               = self._device_count,
             )
             _upload_signals(signals)
         except Exception as exc:
