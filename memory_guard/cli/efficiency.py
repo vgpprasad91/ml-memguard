@@ -1,6 +1,6 @@
 """memguard efficiency — GPU right-sizing report CLI.
 
-Calls GET /v1/efficiency on the memguard-cloud Worker and prints a
+Calls GET /v1/efficiency on the memguard API and prints a
 human-readable table showing the current GPU tier, recommended tier,
 P94 peak, waste percentage, and estimated monthly savings for each
 monitored source/model pair.
@@ -13,9 +13,9 @@ Local mode (default when MEMGUARD_API_URL is unset):
   least 10 runs per (source, model) pair within the lookback window.
 
 Cloud mode (MEMGUARD_API_URL set, or --local not passed):
-  Calls the memguard-cloud Worker.  Set MEMGUARD_API_KEY (or the legacy
-  MEMGUARD_BACKEND_KEY) to your API key.  Use --local to force local mode
-  even when MEMGUARD_API_URL is set.
+  Calls the memguard API (api.memguard.ai).  Set MEMGUARD_API_KEY (or the
+  legacy MEMGUARD_BACKEND_KEY) to your API key.  Get a key at memguard.ai.
+  Use --local to force local mode even when MEMGUARD_API_URL is set.
 
 Usage
 -----
@@ -279,7 +279,7 @@ def main() -> None:
         return
 
     # ------------------------------------------------------------------
-    # Cloud mode: call the memguard-cloud Worker
+    # Cloud mode: call the memguard API
     # ------------------------------------------------------------------
     params   = {"lookback_days": str(lookback)}
     endpoint = "/v1/efficiency/fleet" if args.fleet else "/v1/efficiency"

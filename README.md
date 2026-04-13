@@ -73,10 +73,10 @@ memguard-efficiency --fleet     # reads local telemetry; no env vars needed
 
 #### Cloud — multi-machine fleet
 
-Set `MEMGUARD_API_URL` and `MEMGUARD_API_KEY` to aggregate telemetry across all your machines, unlock the weekly Slack digest, and query the hosted fleet endpoint. See [memguard-cloud/DEPLOYMENT.md](memguard-cloud/DEPLOYMENT.md) to deploy your own Worker.
+Set `MEMGUARD_API_URL` and `MEMGUARD_API_KEY` to aggregate telemetry across all your machines and unlock the weekly Slack digest. Get an API key at [memguard.ai](https://memguard.ai).
 
 ```bash
-export MEMGUARD_API_URL=https://<your-worker>.workers.dev  MEMGUARD_API_KEY=<your-key>
+export MEMGUARD_API_URL=https://api.memguard.ai  MEMGUARD_API_KEY=<your-key>
 memguard-efficiency --fleet     # now aggregates across all machines
 ```
 
@@ -95,7 +95,7 @@ memguard-efficiency --fleet     # now aggregates across all machines
 
 > Requires `MEMGUARD_API_URL` — cloud mode only.
 
-Register a Slack or Teams webhook and memguard-cloud fires it every Monday at 09:00 UTC whenever your fleet's total potential savings exceed $100 — a standing nudge to keep right-sizing tickets moving.
+Register a Slack or Teams webhook and memguard fires it every Monday at 09:00 UTC whenever your fleet's total potential savings exceed $100 — a standing nudge to keep right-sizing tickets moving.
 
 ```bash
 curl -X PUT "$MEMGUARD_API_URL/v1/settings/webhook" \
@@ -150,7 +150,7 @@ usage, Kubernetes sidecar setup, and common troubleshooting.
 
 ### Collect KV Cache Telemetry via OTel Collector
 
-Route your vLLM KV cache signals to memguard-cloud through the OpenTelemetry Collector with a single
+Route your vLLM KV cache signals to memguard through the OpenTelemetry Collector with a single
 pipeline addition — no code changes to your inference server. Set `VLLM_OTEL_KV_METRICS_ENABLED=true`
 and point your collector's `otlphttp` exporter at `https://api.memguard.io/v1/ingest/otlp` with your
 memguard API key in the `Authorization` header. See the
