@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.6.0] - 2026-04-14
+
+### Added — Local Efficiency Reporting
+
+- **`compute_local_efficiency_report(lookback_days, source_id_filter, model_filter, db_path)`**
+  — computes a GPU right-sizing report from local SQLite telemetry with no cloud
+  dependency.  Returns `None` when no telemetry database exists yet, otherwise returns
+  a dict with `"sources"` and `"total_estimated_monthly_savings_usd"` — the same shape
+  used by optional backend integrations, so the CLI's `_print_table` and JSON paths
+  work unchanged.
+
+- **`LocalTelemetryDB`** — thin `sqlite3` reader over `~/.memory-guard/telemetry.db`.
+  Supports `lookback_days`, `source_id_filter`, and `model_filter` at the SQL layer so
+  no data is loaded unnecessarily.
+
+- **`KVCacheMonitor._write_local_telemetry(telemetry)`** — persists each telemetry
+  event to `~/.memory-guard/telemetry.db` before any optional cloud upload.  Uses
+  stdlib `sqlite3` only; errors are swallowed so a disk-full or permissions problem
+  never propagates to the monitor loop.
+
+- **Bundled GPU tier catalog** (`memory_guard/data/gpu_tier_catalog.json`) — 27 SKUs
+  (T4, A10G, L4, V100, A100-40/80, L40S, H100) across 1/2/4/8-GPU configurations with
+  `on_demand_hourly_usd` for savings estimation.  Loaded via `importlib.resources`
+  (wheel-safe, no filesystem path assumptions).
+
+### Changed — Package Layout
+
+- **`memory_guard/` restructured into navigable subpackages:**
+  - `memory_guard.estimation` — preflight estimators, downgrade logic
+  - `memory_guard.monitoring` — `RuntimeMonitor`, `KVCacheMonitor`, `CUDAOOMRecovery`, platform helpers
+  - `memory_guard.adaptation` — `BanditPolicy`, calibration, reward signals
+  - `memory_guard.deployment` — `VLLMWatchdog`, sidecar, Kubernetes policy watcher
+
+  All existing top-level imports (`from memory_guard import MemoryGuard`, etc.) remain
+  fully backward-compatible — `memory_guard/__init__.py` re-exports every public symbol.
+
+### Changed — Repository Layout
+
+- Helm chart, paper/benchmarks, integration examples, and documentation moved to
+  separate focused repositories under the `memguard-project` GitHub org:
+  `memguard-helm`, `memguard-paper`, `memguard-examples`, `memguard-docs`.
+  The core library (`ml-memguard`) now contains only the Python package, tests, and
+  CI configuration.
+
+### Tests
+
+- 39 new tests in `tests/test_local_efficiency.py` covering `_p94`, `_match_current_tier`,
+  `_recommend_tier`, `LocalTelemetryDB`, `compute_local_efficiency_report`, and
+  `KVCacheMonitor._write_local_telemetry` (including exception-swallowing behaviour).
+- Full suite: **820 tests passing**.
+
+---
+
 ## [0.5.0] - 2026-04-11
 
 ### Added — Auto-Heal Recovery API
