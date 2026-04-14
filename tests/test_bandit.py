@@ -26,7 +26,7 @@ import math
 
 import pytest
 
-from memory_guard.bandit import (
+from memory_guard.adaptation.bandit import (
     DEFAULT_POLICY_PATH,
     BanditPolicy,
     _action_to_str,
@@ -34,7 +34,7 @@ from memory_guard.bandit import (
     _str_to_action,
     _str_to_state_key,
 )
-from memory_guard.bandit_state import (
+from memory_guard.adaptation.bandit_state import (
     ConfigAction,
     DeviceFingerprint,
     ModelFingerprint,

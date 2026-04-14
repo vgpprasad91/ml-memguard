@@ -23,7 +23,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from .constants import FALLBACK_AVAILABLE_RATIO
+from ..constants import FALLBACK_AVAILABLE_RATIO
 
 # Global lock for ctypes Mach kernel calls. ctypes releases the GIL
 # during foreign function calls, which means our monitor's background
@@ -330,7 +330,7 @@ def _mach_memory_pressure() -> float:
             used_ratio = (active + wired) / total
             return max(0.0, min(1.0, used_ratio))
 
-    from .constants import FALLBACK_PRESSURE; return FALLBACK_PRESSURE
+    from ..constants import FALLBACK_PRESSURE; return FALLBACK_PRESSURE
 
 
 def _mach_available_mb() -> float:
@@ -368,7 +368,7 @@ def _mach_available_mb() -> float:
                 # Fall through to fallback instead of returning 0.
                 logger.debug("Negative reclaimable memory (%d bytes), using fallback", reclaimable)
             else:
-                from .constants import MACOS_RECLAIMABLE_DISCOUNT
+                from ..constants import MACOS_RECLAIMABLE_DISCOUNT
                 available = reclaimable * MACOS_RECLAIMABLE_DISCOUNT
                 return available / (1024 * 1024)
 
@@ -377,7 +377,7 @@ def _mach_available_mb() -> float:
         total = _sysctl_int64("hw.memsize")
         return (total * FALLBACK_AVAILABLE_RATIO) / (1024 * 1024)
     except Exception:
-        from .constants import FALLBACK_MEMORY_MB; return FALLBACK_MEMORY_MB
+        from ..constants import FALLBACK_MEMORY_MB; return FALLBACK_MEMORY_MB
 
 
 # Linux Detection
@@ -524,7 +524,7 @@ def _cgroup_memory_limit_mb() -> Optional[float]:
                 # Ref: https://www.kernel.org/doc/Documentation/cgroup-v2.txt
                 # "memory.high [...] can be exceeded"
                 if tightest_is_high:
-                    from .constants import CGROUP_HIGH_DISCOUNT
+                    from ..constants import CGROUP_HIGH_DISCOUNT
                     limit_mb *= CGROUP_HIGH_DISCOUNT
                 return limit_mb
     except Exception as _exc:
@@ -541,7 +541,7 @@ def _cgroup_memory_limit_mb() -> Optional[float]:
                     if limit < 1024 * 1024 * 1024 * 1024:
                         limit_mb = limit / (1024 * 1024)
                         if mem_file == "memory.high":
-                            from .constants import CGROUP_HIGH_DISCOUNT
+                            from ..constants import CGROUP_HIGH_DISCOUNT
                             limit_mb *= CGROUP_HIGH_DISCOUNT
                         return limit_mb
         except Exception as _exc:
@@ -638,7 +638,7 @@ def _linux_pressure() -> float:
                 if line.startswith("some"):
                     for part in line.split():
                         if part.startswith("avg10="):
-                            from .constants import PSI_CRITICAL_THRESHOLD
+                            from ..constants import PSI_CRITICAL_THRESHOLD
                             psi = float(part.split("=")[1])
                             return min(1.0, psi / PSI_CRITICAL_THRESHOLD)
     except Exception as _exc:
@@ -657,7 +657,7 @@ def _linux_pressure() -> float:
     if total > 0:
         return max(0.0, min(1.0, 1.0 - (available / total)))
 
-    from .constants import FALLBACK_PRESSURE; return FALLBACK_PRESSURE
+    from ..constants import FALLBACK_PRESSURE; return FALLBACK_PRESSURE
 
 
 # Windows Detection
@@ -726,7 +726,7 @@ def _windows_pressure() -> float:
     stat = _windows_memory_status()
     if stat:
         return stat.dwMemoryLoad / 100.0
-    from .constants import FALLBACK_PRESSURE; return FALLBACK_PRESSURE
+    from ..constants import FALLBACK_PRESSURE; return FALLBACK_PRESSURE
 
 
 # GPU Detection
@@ -864,7 +864,7 @@ def _get_total_ram_fallback() -> float:
     except ImportError as _exc:
         logger.debug("Platform detection fallback: %s", _exc)
 
-    from .constants import FALLBACK_MEMORY_MB
+    from ..constants import FALLBACK_MEMORY_MB
     logger.debug("All RAM detection failed, using fallback: %dMB", FALLBACK_MEMORY_MB)
     return FALLBACK_MEMORY_MB
 
@@ -929,4 +929,4 @@ def get_memory_pressure(backend: Optional[Backend] = None) -> float:
     if fn:
         return fn()
 
-    from .constants import FALLBACK_PRESSURE; return FALLBACK_PRESSURE
+    from ..constants import FALLBACK_PRESSURE; return FALLBACK_PRESSURE

@@ -291,7 +291,7 @@ def estimate_training_memory(
 
     # QLoRA double quantization overhead (see constants.QLORA_DOUBLE_QUANT_OVERHEAD_BYTES)
     if train.method == FinetuneMethod.QLORA and train.qlora_double_quant:
-        from .constants import QLORA_DOUBLE_QUANT_OVERHEAD_BYTES
+        from ..constants import QLORA_DOUBLE_QUANT_OVERHEAD_BYTES
         est.quantization_overhead_mb = (model.params * QLORA_DOUBLE_QUANT_OVERHEAD_BYTES) / MB
 
     # 2. Multi-modal encoder
@@ -388,7 +388,7 @@ def estimate_training_memory(
 
     # MLX lazy evaluation discount: operation fusion and deferred
     # materialization can reduce actual peak vs theoretical worst-case.
-    from .constants import LAZY_EVAL_DISCOUNT
+    from ..constants import LAZY_EVAL_DISCOUNT
     lazy_discount = LAZY_EVAL_DISCOUNT if train.lazy_evaluation else 1.0
 
     est.activations_mb = (total_act_per_layer * effective_layers * lazy_discount) / MB
@@ -416,7 +416,7 @@ def estimate_training_memory(
     # fixed (framework runtime, Metal shaders, Python interpreter).
     # The fixed cost is critical for small models where proportional
     # overhead alone under-estimates by 30-40%.
-    from .constants import FIXED_OVERHEAD_MB
+    from ..constants import FIXED_OVERHEAD_MB
     subtotal = (est.model_weights_mb + est.adapter_params_mb +
                 est.optimizer_states_mb + est.activations_mb +
                 est.gradients_mb + est.kv_cache_mb +
@@ -463,7 +463,7 @@ def estimate_inference_memory(
     est.activations_mb = (batch_size * seq_length * model.hidden_dim * dtype_bytes) / MB
 
     subtotal = est.model_weights_mb + est.kv_cache_mb + est.activations_mb + est.encoder_mb
-    from .constants import OVERHEAD_RATIO_INFERENCE, FIXED_OVERHEAD_MB
+    from ..constants import OVERHEAD_RATIO_INFERENCE, FIXED_OVERHEAD_MB
     est.overhead_mb = subtotal * OVERHEAD_RATIO_INFERENCE + FIXED_OVERHEAD_MB
     est.total_mb = subtotal + est.overhead_mb
 
@@ -554,7 +554,7 @@ def estimate_serving_memory(
         est.activations_mb = act_bytes / MB
 
     # 4. Proportional fragmentation overhead + fixed framework runtime cost
-    from .constants import OVERHEAD_RATIO_INFERENCE, FIXED_OVERHEAD_MB
+    from ..constants import OVERHEAD_RATIO_INFERENCE, FIXED_OVERHEAD_MB
     subtotal = est.model_weights_mb + est.kv_cache_mb + est.activations_mb
     est.overhead_mb = subtotal * OVERHEAD_RATIO_INFERENCE + FIXED_OVERHEAD_MB
     est.total_mb = subtotal + est.overhead_mb

@@ -40,7 +40,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from memory_guard.telemetry import InferenceTelemetry
-from memory_guard.watchdog import VLLMWatchdog
+from memory_guard.deployment.watchdog import VLLMWatchdog
 
 
 # ---------------------------------------------------------------------------
@@ -68,8 +68,8 @@ def _make_fake_session(
 
 def _make_watchdog(ebpf_session: Any = None) -> VLLMWatchdog:
     """Return a minimal VLLMWatchdog with mocked bandit + state_key."""
-    from memory_guard.bandit import BanditPolicy
-    from memory_guard.bandit_state import StateKey
+    from memory_guard.adaptation.bandit import BanditPolicy
+    from memory_guard.adaptation.bandit_state import StateKey
 
     state_key = StateKey.from_values(
         available_mb=8192.0,
@@ -177,7 +177,7 @@ class TestKVCacheMonitorEBPFSignals:
 
     def _run_upload(self, ebpf_session=None) -> InferenceTelemetry:
         """Invoke _upload_inference_telemetry and capture the InferenceTelemetry."""
-        from memory_guard.inference_monitor import KVCacheMonitor
+        from memory_guard.monitoring.inference_monitor import KVCacheMonitor
 
         captured = []
 
@@ -189,9 +189,9 @@ class TestKVCacheMonitorEBPFSignals:
             ebpf_session=ebpf_session,
         )
 
-        with patch("memory_guard.inference_monitor.upload_inference_signals", None):
+        with patch("memory_guard.monitoring.inference_monitor.upload_inference_signals", None):
             with patch(
-                "memory_guard.backends.upload_inference_signals",
+                "memory_guard.integrations.upload_inference_signals",
                 side_effect=_fake_upload,
                 create=True,
             ):
@@ -200,13 +200,13 @@ class TestKVCacheMonitorEBPFSignals:
 
         if captured:
             return captured[0]
-        # If upload skipped (no API key path not patched), build inline
+        # If upload skipped (no integration is patched), build inline
         return None
 
     def test_page_fault_rate_in_telemetry(self):
         """page_fault_rate from session appears in InferenceTelemetry."""
         session = _make_fake_session(page_fault_rate=25.0, available=True)
-        from memory_guard.inference_monitor import KVCacheMonitor
+        from memory_guard.monitoring.inference_monitor import KVCacheMonitor
 
         monitor = KVCacheMonitor(poll_fn=lambda: (50, 100), ebpf_session=session)
         captured = []
@@ -215,7 +215,7 @@ class TestKVCacheMonitorEBPFSignals:
             captured.append(s)
 
         with patch(
-            "memory_guard.inference_monitor.upload_inference_signals",
+            "memory_guard.monitoring.inference_monitor.upload_inference_signals",
             side_effect=_capture,
             create=True,
         ):
@@ -245,7 +245,7 @@ class TestKVCacheMonitorEBPFSignals:
 
     def test_bpf_fields_zero_when_session_none(self):
         """All BPF fields are 0.0 when ebpf_session=None."""
-        from memory_guard.inference_monitor import KVCacheMonitor
+        from memory_guard.monitoring.inference_monitor import KVCacheMonitor
 
         monitor = KVCacheMonitor(poll_fn=lambda: (50, 100), ebpf_session=None)
         captured = []
@@ -254,7 +254,7 @@ class TestKVCacheMonitorEBPFSignals:
             captured.append(s)
 
         with patch(
-            "memory_guard.inference_monitor.upload_inference_signals",
+            "memory_guard.monitoring.inference_monitor.upload_inference_signals",
             side_effect=_capture,
             create=True,
         ):
@@ -269,7 +269,7 @@ class TestKVCacheMonitorEBPFSignals:
     def test_bpf_fields_zero_when_session_unavailable(self):
         """BPF fields stay 0.0 when session.available=False."""
         session = _make_fake_session(available=False, page_fault_rate=99.0)
-        from memory_guard.inference_monitor import KVCacheMonitor
+        from memory_guard.monitoring.inference_monitor import KVCacheMonitor
 
         monitor = KVCacheMonitor(poll_fn=lambda: (50, 100), ebpf_session=session)
         # When available=False the branch is skipped
@@ -288,7 +288,7 @@ class TestKVCacheMonitorPredictPayload:
 
     def test_page_fault_in_predict_when_session_active(self):
         """page_fault_rate is added to the predict_oom signals when session active."""
-        from memory_guard.inference_monitor import KVCacheMonitor
+        from memory_guard.monitoring.inference_monitor import KVCacheMonitor
 
         session = _make_fake_session(page_fault_rate=40.0, available=True)
         monitor = KVCacheMonitor(poll_fn=lambda: (50, 100), ebpf_session=session)
@@ -297,10 +297,10 @@ class TestKVCacheMonitorPredictPayload:
 
         def _fake_predict(signals, model_name="", backend_str=""):
             captured_signals.update(signals)
-            return None  # no backend response
+            return None  # no integration response
 
         with patch(
-            "memory_guard.inference_monitor.predict_oom",
+            "memory_guard.monitoring.inference_monitor.predict_oom",
             side_effect=_fake_predict,
             create=True,
         ):
@@ -317,7 +317,7 @@ class TestKVCacheMonitorPredictPayload:
 
     def test_memory_pressure_in_predict_when_session_active(self):
         """memory_pressure_level is added to predict_oom signals when session active."""
-        from memory_guard.inference_monitor import KVCacheMonitor
+        from memory_guard.monitoring.inference_monitor import KVCacheMonitor
 
         session = _make_fake_session(
             memory_pressure_bytes=128 * 1024 * 1024, available=True
@@ -331,7 +331,7 @@ class TestKVCacheMonitorPredictPayload:
             return None
 
         with patch(
-            "memory_guard.inference_monitor.predict_oom",
+            "memory_guard.monitoring.inference_monitor.predict_oom",
             side_effect=_fake_predict,
             create=True,
         ):
@@ -345,7 +345,7 @@ class TestKVCacheMonitorPredictPayload:
 
     def test_bpf_signals_absent_when_session_none(self):
         """No BPF signals added to predict payload when ebpf_session=None."""
-        from memory_guard.inference_monitor import KVCacheMonitor
+        from memory_guard.monitoring.inference_monitor import KVCacheMonitor
 
         monitor = KVCacheMonitor(poll_fn=lambda: (50, 100), ebpf_session=None)
 
@@ -356,7 +356,7 @@ class TestKVCacheMonitorPredictPayload:
             return None
 
         with patch(
-            "memory_guard.inference_monitor.predict_oom",
+            "memory_guard.monitoring.inference_monitor.predict_oom",
             side_effect=_fake_predict,
             create=True,
         ):

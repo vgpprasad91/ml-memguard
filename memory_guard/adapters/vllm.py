@@ -55,7 +55,7 @@ from typing import Optional
 
 from ..constants import MONITOR_POLL_INTERVAL
 from ..guard import InferenceSafeConfig, MemoryGuard
-from ..inference_monitor import KVCacheMonitor
+from ..monitoring.inference_monitor import KVCacheMonitor
 from .base import optional_import
 
 logger = logging.getLogger(__name__)

@@ -22,8 +22,8 @@ from __future__ import annotations
 
 import pytest
 
-from memory_guard.bandit import BanditPolicy, MIN_UPDATES_FOR_CONFIDENCE
-from memory_guard.bandit_state import (
+from memory_guard.adaptation.bandit import BanditPolicy, MIN_UPDATES_FOR_CONFIDENCE
+from memory_guard.adaptation.bandit_state import (
     ConfigAction,
     DeviceFingerprint,
     ModelFingerprint,

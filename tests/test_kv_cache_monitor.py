@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from memory_guard.inference_monitor import KVCacheMonitor
+from memory_guard.monitoring.inference_monitor import KVCacheMonitor
 
 
 # ---------------------------------------------------------------------------

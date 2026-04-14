@@ -206,7 +206,7 @@ class MemoryGuardCallback(_TrainerCallbackBase):  # type: ignore[misc]
         if not history:
             return
         latest = history[-1]
-        from ..monitor import RuntimeMonitor
+        from ..monitoring.monitor import RuntimeMonitor
         if latest >= RuntimeMonitor.THRESHOLD_WARNING:
             logger.warning(
                 "[memory-guard] Memory pressure at %.0f%% — "

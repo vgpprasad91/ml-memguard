@@ -25,7 +25,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from memory_guard.inference_monitor import KVCacheMonitor
+from memory_guard.monitoring.inference_monitor import KVCacheMonitor
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +183,7 @@ class TestKVCacheMonitorPredictIntegration:
         shed_calls: list = []
         mon = _make_monitor(on_shed_load=lambda u: shed_calls.append(u))
 
-        with patch("memory_guard.backends.predict_oom",
+        with patch("memory_guard.integrations.predict_oom",
                    return_value=_make_prediction(0.80)):
             mon._run_predict_oom(kv_velocity=2.0, utilization=0.75,
                                  shed_ready=True)
@@ -194,7 +194,7 @@ class TestKVCacheMonitorPredictIntegration:
         restart_calls: list = []
         mon = _make_monitor(restart_callback=lambda: restart_calls.append(1))
 
-        with patch("memory_guard.backends.predict_oom",
+        with patch("memory_guard.integrations.predict_oom",
                    return_value=_make_prediction(0.95)):
             mon._run_predict_oom(kv_velocity=6.0, utilization=0.88,
                                  shed_ready=True)
@@ -209,7 +209,7 @@ class TestKVCacheMonitorPredictIntegration:
             restart_callback=lambda: restart_calls.append(1),
         )
 
-        with patch("memory_guard.backends.predict_oom",
+        with patch("memory_guard.integrations.predict_oom",
                    return_value=_make_prediction(0.45)):
             mon._run_predict_oom(kv_velocity=0.5, utilization=0.50,
                                  shed_ready=True)
@@ -222,7 +222,7 @@ class TestKVCacheMonitorPredictIntegration:
         shed_calls: list = []
         mon = _make_monitor(on_shed_load=lambda u: shed_calls.append(u))
 
-        with patch("memory_guard.backends.predict_oom", return_value=None):
+        with patch("memory_guard.integrations.predict_oom", return_value=None):
             mon._run_predict_oom(kv_velocity=5.0, utilization=0.88,
                                  shed_ready=True)
 
@@ -233,7 +233,7 @@ class TestKVCacheMonitorPredictIntegration:
         shed_calls: list = []
         mon = _make_monitor(on_shed_load=lambda u: shed_calls.append(u))
 
-        with patch("memory_guard.backends.predict_oom",
+        with patch("memory_guard.integrations.predict_oom",
                    return_value=_make_prediction(0.80)):
             # shed_ready=False means cooldown hasn't elapsed
             mon._run_predict_oom(kv_velocity=2.0, utilization=0.75,
@@ -248,7 +248,7 @@ class TestKVCacheMonitorPredictIntegration:
         # Simulate a restart that happened 5 seconds ago (within cooldown)
         mon._last_predictive_restart = time.time() - 5.0
 
-        with patch("memory_guard.backends.predict_oom",
+        with patch("memory_guard.integrations.predict_oom",
                    return_value=_make_prediction(0.97)):
             mon._run_predict_oom(kv_velocity=9.0, utilization=0.95,
                                  shed_ready=True)
@@ -267,7 +267,7 @@ class TestKVCacheMonitorPredictIntegration:
             extended_poll_fn=lambda: {"eviction_rate": 5.5, "fragmentation_ratio": 0.7}
         )
 
-        with patch("memory_guard.backends.predict_oom", side_effect=fake_predict):
+        with patch("memory_guard.integrations.predict_oom", side_effect=fake_predict):
             mon._run_predict_oom(kv_velocity=3.0, utilization=0.70,
                                  shed_ready=True)
 
@@ -278,7 +278,7 @@ class TestKVCacheMonitorPredictIntegration:
         """Any exception in _run_predict_oom must be swallowed."""
         mon = _make_monitor()
 
-        with patch("memory_guard.backends.predict_oom",
+        with patch("memory_guard.integrations.predict_oom",
                    side_effect=RuntimeError("network exploded")):
             # Must not raise
             mon._run_predict_oom(kv_velocity=3.0, utilization=0.70,

@@ -129,10 +129,10 @@ def _str_to_action(s: str) -> ConfigAction:
 
 
 # ---------------------------------------------------------------------------
-# Cloud merge helper
+# Optional-backend merge helper
 # ---------------------------------------------------------------------------
 
-def _merge_cloud_policy(policy: "BanditPolicy") -> None:
+def _merge_backend_policy(policy: "BanditPolicy") -> None:
     """Merge downloaded Q-table entries into *policy* in-place.
 
     Strategy: weighted average by ``num_updates`` for entries that exist in
@@ -140,7 +140,7 @@ def _merge_cloud_policy(policy: "BanditPolicy") -> None:
     Never raises — backend failures are silently ignored.
     """
     try:
-        from .backends import download_policy as _download_policy
+        from .integrations import download_policy as _download_policy
         remote_data = _download_policy()
         if not remote_data or "q_table" not in remote_data:
             return
@@ -491,7 +491,7 @@ class BanditPolicy:
 
         # Backend sync — fire-and-forget; never blocks or raises
         try:
-            from .backends import upload_policy as _upload_policy
+            from .integrations import upload_policy as _upload_policy
             _upload_policy(payload)
         except Exception:
             pass
@@ -523,7 +523,7 @@ class BanditPolicy:
                 "[memory-guard] No RL policy at %s — starting fresh.", source
             )
             policy = cls(**init_kwargs)
-            _merge_cloud_policy(policy)
+            _merge_backend_policy(policy)
             return policy
 
         try:
@@ -568,7 +568,7 @@ class BanditPolicy:
                 policy.num_states,
                 policy.epsilon,
             )
-            _merge_cloud_policy(policy)
+            _merge_backend_policy(policy)
             return policy
 
         except Exception as exc:

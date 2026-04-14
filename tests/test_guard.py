@@ -23,7 +23,7 @@ from memory_guard import (
     auto_downgrade,
     Backend,
 )
-from memory_guard.monitor import RuntimeMonitor
+from memory_guard.monitoring.monitor import RuntimeMonitor
 
 
 # Estimator Tests
@@ -301,7 +301,7 @@ class TestPlatform:
 
     @pytest.mark.skipif(platform.system() != "Darwin", reason="macOS only")
     def test_macos_page_size(self):
-        from memory_guard.platforms import _mach_page_size
+        from memory_guard.monitoring.platforms import _mach_page_size
         ps = _mach_page_size()
         if platform.machine() == "arm64":
             assert ps == 16384
@@ -310,14 +310,14 @@ class TestPlatform:
 
     @pytest.mark.skipif(platform.system() != "Darwin", reason="macOS only")
     def test_macos_mach_vm_stats(self):
-        from memory_guard.platforms import _mach_vm_stats
+        from memory_guard.monitoring.platforms import _mach_vm_stats
         stats = _mach_vm_stats()
         assert stats is not None
         assert stats.free_count >= 0
 
     @pytest.mark.skipif(platform.system() != "Darwin", reason="macOS only")
     def test_macos_sysctl(self):
-        from memory_guard.platforms import _sysctl_int64
+        from memory_guard.monitoring.platforms import _sysctl_int64
         memsize = _sysctl_int64("hw.memsize")
         assert memsize > 1024 * 1024 * 1024  # > 1GB
 
@@ -342,7 +342,7 @@ class TestPlatform:
     @pytest.mark.skipif(platform.system() != "Darwin", reason="macOS only")
     def test_macos_ctypes_argtypes_set(self):
         """Verify ARM64 ABI-compliant argtypes are set on libc functions."""
-        from memory_guard.platforms import _get_libc
+        from memory_guard.monitoring.platforms import _get_libc
         libc = _get_libc()
         assert libc.sysctlbyname.argtypes is not None
         assert len(libc.sysctlbyname.argtypes) == 5
@@ -352,7 +352,7 @@ class TestPlatform:
     @pytest.mark.skipif(platform.system() != "Darwin", reason="macOS only")
     def test_macos_available_less_than_total(self):
         """Available memory should be positive and less than total RAM."""
-        from memory_guard.platforms import _mach_available_mb, _sysctl_int64
+        from memory_guard.monitoring.platforms import _mach_available_mb, _sysctl_int64
         avail = _mach_available_mb()
         total_mb = _sysctl_int64("hw.memsize") / (1024 * 1024)
         assert avail > 0
@@ -506,7 +506,7 @@ class TestCalibration:
     """Auto-calibration system tests."""
 
     def test_calibration_store_add_and_retrieve(self, tmp_path):
-        from memory_guard.calibration import CalibrationStore, CalibrationPoint
+        from memory_guard.adaptation.calibration import CalibrationStore, CalibrationPoint
         store = CalibrationStore(path=tmp_path / "cal.json")
         assert store.num_points == 0
 
@@ -522,7 +522,7 @@ class TestCalibration:
         assert abs(factor - 0.9) < 0.01  # Should be ~0.9
 
     def test_calibration_needs_minimum_points(self, tmp_path):
-        from memory_guard.calibration import CalibrationStore, CalibrationPoint
+        from memory_guard.adaptation.calibration import CalibrationStore, CalibrationPoint
         store = CalibrationStore(path=tmp_path / "cal.json")
 
         # Only 2 points — not enough for confidence
@@ -533,7 +533,7 @@ class TestCalibration:
         assert factor == 1.0  # No correction without >=3 points
 
     def test_calibration_persists(self, tmp_path):
-        from memory_guard.calibration import CalibrationStore, CalibrationPoint
+        from memory_guard.adaptation.calibration import CalibrationStore, CalibrationPoint
         path = tmp_path / "cal.json"
 
         store1 = CalibrationStore(path=path)
@@ -546,7 +546,7 @@ class TestCalibration:
         assert abs(store2.get_correction_factor() - 0.9) < 0.01
 
     def test_calibration_outlier_robust(self, tmp_path):
-        from memory_guard.calibration import CalibrationStore, CalibrationPoint
+        from memory_guard.adaptation.calibration import CalibrationStore, CalibrationPoint
         store = CalibrationStore(path=tmp_path / "cal.json")
 
         # 4 normal points at 0.8x, 1 outlier at 5x
@@ -567,7 +567,7 @@ class TestCalibration:
         assert guard._calibration_store is None
 
     def test_record_result(self, tmp_path):
-        from memory_guard.calibration import CalibrationStore
+        from memory_guard.adaptation.calibration import CalibrationStore
         store = CalibrationStore(path=tmp_path / "cal.json")
 
         guard = MemoryGuard.auto(enable_calibration=True)
@@ -588,7 +588,7 @@ class TestThreadSafety:
     def test_concurrent_mach_calls(self):
         """Multiple threads reading memory stats shouldn't crash."""
         import concurrent.futures
-        from memory_guard.platforms import _mach_vm_stats, _sysctl_int64
+        from memory_guard.monitoring.platforms import _mach_vm_stats, _sysctl_int64
 
         results = []
         errors = []
@@ -836,7 +836,7 @@ class TestCalibrationSecurity:
     """m7/m12: Calibration factor clamping and file permissions."""
 
     def test_adversarial_factor_rejected(self, tmp_path):
-        from memory_guard.calibration import CalibrationStore, CalibrationPoint
+        from memory_guard.adaptation.calibration import CalibrationStore, CalibrationPoint
         store = CalibrationStore(path=tmp_path / "cal.json")
         # Factor 0.11 (10x under-estimate) should be rejected by 0.5-2.0 bounds
         for _ in range(5):
@@ -844,7 +844,7 @@ class TestCalibrationSecurity:
         assert store.get_correction_factor() == 1.0  # Rejected, no correction
 
     def test_extreme_over_factor_rejected(self, tmp_path):
-        from memory_guard.calibration import CalibrationStore, CalibrationPoint
+        from memory_guard.adaptation.calibration import CalibrationStore, CalibrationPoint
         store = CalibrationStore(path=tmp_path / "cal.json")
         # Factor 5.0 (5x over-estimate) should be rejected
         for _ in range(5):
@@ -852,7 +852,7 @@ class TestCalibrationSecurity:
         assert store.get_correction_factor() == 1.0
 
     def test_legitimate_factor_accepted(self, tmp_path):
-        from memory_guard.calibration import CalibrationStore, CalibrationPoint
+        from memory_guard.adaptation.calibration import CalibrationStore, CalibrationPoint
         store = CalibrationStore(path=tmp_path / "cal.json")
         for _ in range(5):
             store.add_point(CalibrationPoint(estimated_mb=10000, actual_peak_mb=9000))
@@ -876,7 +876,7 @@ class TestCalibrationMalformed:
     """C1: Malformed JSON should not crash the library."""
 
     def test_points_is_string(self, tmp_path):
-        from memory_guard.calibration import CalibrationStore
+        from memory_guard.adaptation.calibration import CalibrationStore
         path = tmp_path / "cal.json"
         path.write_text('{"points": "not a list"}')
         store = CalibrationStore(path=path)
@@ -884,28 +884,28 @@ class TestCalibrationMalformed:
         assert store.get_correction_factor() == 1.0
 
     def test_points_is_number(self, tmp_path):
-        from memory_guard.calibration import CalibrationStore
+        from memory_guard.adaptation.calibration import CalibrationStore
         path = tmp_path / "cal.json"
         path.write_text('{"points": 42}')
         store = CalibrationStore(path=path)
         assert store.num_points == 0
 
     def test_points_has_non_dict_entries(self, tmp_path):
-        from memory_guard.calibration import CalibrationStore
+        from memory_guard.adaptation.calibration import CalibrationStore
         path = tmp_path / "cal.json"
         path.write_text('{"points": ["bad", 123, {"correction_factor": 0.9}]}')
         store = CalibrationStore(path=path)
         assert store.num_points == 1  # Only the valid dict
 
     def test_invalid_json(self, tmp_path):
-        from memory_guard.calibration import CalibrationStore
+        from memory_guard.adaptation.calibration import CalibrationStore
         path = tmp_path / "cal.json"
         path.write_text('not json at all {{{')
         store = CalibrationStore(path=path)
         assert store.num_points == 0
 
     def test_empty_file(self, tmp_path):
-        from memory_guard.calibration import CalibrationStore
+        from memory_guard.adaptation.calibration import CalibrationStore
         path = tmp_path / "cal.json"
         path.write_text('')
         store = CalibrationStore(path=path)
@@ -917,7 +917,7 @@ class TestCalibrationBounds:
 
     def test_factor_0_7_rejected(self, tmp_path):
         """0.7x factor (was previously accepted) should now be rejected."""
-        from memory_guard.calibration import CalibrationStore, CalibrationPoint
+        from memory_guard.adaptation.calibration import CalibrationStore, CalibrationPoint
         store = CalibrationStore(path=tmp_path / "cal.json")
         for _ in range(5):
             store.add_point(CalibrationPoint(estimated_mb=1000, actual_peak_mb=700))
@@ -925,7 +925,7 @@ class TestCalibrationBounds:
 
     def test_factor_1_2_accepted(self, tmp_path):
         """1.2x factor should be within 0.8-1.3 bounds."""
-        from memory_guard.calibration import CalibrationStore, CalibrationPoint
+        from memory_guard.adaptation.calibration import CalibrationStore, CalibrationPoint
         store = CalibrationStore(path=tmp_path / "cal.json")
         for _ in range(5):
             store.add_point(CalibrationPoint(estimated_mb=1000, actual_peak_mb=1200))
@@ -947,14 +947,14 @@ class TestCrossPlatformMocked:
 
     def test_cgroup_v2_memory_high(self, tmp_path):
         """Mock cgroups v2 memory.high file."""
-        from memory_guard.platforms import _cgroup_memory_limit_mb
+        from memory_guard.monitoring.platforms import _cgroup_memory_limit_mb
         # On macOS, cgroup functions return None (no /proc/self/cgroup)
         result = _cgroup_memory_limit_mb()
         assert result is None or isinstance(result, float)
 
     def test_cuda_detection_returns_none_without_torch(self):
         """CUDA detection returns None when torch import fails."""
-        from memory_guard.platforms import _detect_cuda
+        from memory_guard.monitoring.platforms import _detect_cuda
         with patch.dict("sys.modules", {"torch": None}):
             # Force reimport to hit the ImportError path
             import importlib
@@ -1026,7 +1026,7 @@ class TestLazyEvalOnlyAppleSilicon:
     """C3: lazy_evaluation must not auto-enable on Intel Macs."""
 
     def test_intel_mac_no_lazy(self):
-        from memory_guard.platforms import PlatformInfo, Backend
+        from memory_guard.monitoring.platforms import PlatformInfo, Backend
         intel_platform = PlatformInfo(
             backend=Backend.APPLE_INTEL, system="Darwin", arch="x86_64",
             total_memory_mb=16384, gpu_memory_mb=0,
@@ -1076,20 +1076,20 @@ class TestForkSafety:
 
     @pytest.mark.skipif(platform.system() != "Darwin", reason="macOS only")
     def test_clear_mach_caches_exists(self):
-        from memory_guard.platforms import _clear_mach_caches
+        from memory_guard.monitoring.platforms import _clear_mach_caches
         # Should not raise
         _clear_mach_caches()
 
     @pytest.mark.skipif(platform.system() != "Darwin", reason="macOS only")
     def test_caches_cleared_after_call(self):
-        from memory_guard.platforms import (
+        from memory_guard.monitoring.platforms import (
             _clear_mach_caches, _mach_vm_stats, _mach_page_size,
         )
         # Populate caches
         _mach_page_size()
         _mach_vm_stats()
 
-        import memory_guard.platforms as plat
+        import memory_guard.monitoring.platforms as plat
         assert plat._page_size_cache is not None
         assert plat._mach_host_cache is not None
 

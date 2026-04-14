@@ -28,7 +28,7 @@ from memory_guard.adapters.vllm import (
     guard_vllm,
 )
 from memory_guard.guard import InferenceSafeConfig, MemoryGuard
-from memory_guard.inference_monitor import KVCacheMonitor
+from memory_guard.monitoring.inference_monitor import KVCacheMonitor
 
 
 # ---------------------------------------------------------------------------

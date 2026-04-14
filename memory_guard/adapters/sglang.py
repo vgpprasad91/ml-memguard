@@ -62,7 +62,7 @@ import logging
 from typing import Callable, Optional
 
 from ..guard import InferenceSafeConfig, MemoryGuard
-from ..inference_monitor import KVCacheMonitor
+from ..monitoring.inference_monitor import KVCacheMonitor
 from .base import optional_import
 
 logger = logging.getLogger(__name__)

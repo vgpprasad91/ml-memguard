@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from memory_guard.adapters.huggingface import MemoryGuardCallback, guard_trainer
-from memory_guard.monitor import RuntimeMonitor
+from memory_guard.monitoring.monitor import RuntimeMonitor
 
 
 # ---------------------------------------------------------------------------

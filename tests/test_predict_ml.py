@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from memory_guard.inference_monitor import KVCacheMonitor
+from memory_guard.monitoring.inference_monitor import KVCacheMonitor
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +75,7 @@ class TestRunPredictOomLogging:
 
         result = _predict_result(p, "shed_load" if p > 0.70 else "none", model_source)
 
-        with patch("memory_guard.backends.predict_oom", return_value=result):
+        with patch("memory_guard.integrations.predict_oom", return_value=result):
             mon._run_predict_oom(
                 kv_velocity=2.0,
                 utilization=0.85,
@@ -84,8 +84,8 @@ class TestRunPredictOomLogging:
         return emitted
 
     def test_debug_log_emitted_for_ml_source(self, caplog):
-        with caplog.at_level(logging.DEBUG, logger="memory_guard.inference_monitor"):
-            with patch("memory_guard.backends.predict_oom",
+        with caplog.at_level(logging.DEBUG, logger="memory_guard.monitoring.inference_monitor"):
+            with patch("memory_guard.integrations.predict_oom",
                        return_value=_predict_result(0.5, "none", "ml")):
                 mon = _make_monitor()
                 mon._run_predict_oom(
@@ -94,8 +94,8 @@ class TestRunPredictOomLogging:
         assert any("ml" in r.message for r in caplog.records)
 
     def test_debug_log_emitted_for_lr_fallback_source(self, caplog):
-        with caplog.at_level(logging.DEBUG, logger="memory_guard.inference_monitor"):
-            with patch("memory_guard.backends.predict_oom",
+        with caplog.at_level(logging.DEBUG, logger="memory_guard.monitoring.inference_monitor"):
+            with patch("memory_guard.integrations.predict_oom",
                        return_value=_predict_result(0.5, "none", "lr_fallback")):
                 mon = _make_monitor()
                 mon._run_predict_oom(
@@ -125,7 +125,7 @@ class TestRunPredictOomLogging:
             "confidence":      0.9,
             # model_source intentionally absent — backward compat
         }
-        with patch("memory_guard.backends.predict_oom", return_value=result):
+        with patch("memory_guard.integrations.predict_oom", return_value=result):
             mon._run_predict_oom(kv_velocity=1.0, utilization=0.5, shed_ready=False)
         # No exception raised — test passes implicitly
 
@@ -137,8 +137,8 @@ class TestRunPredictOomLogging:
             "horizon_seconds": 60,
             "confidence":      0.9,
         }
-        with caplog.at_level(logging.DEBUG, logger="memory_guard.inference_monitor"):
-            with patch("memory_guard.backends.predict_oom", return_value=result):
+        with caplog.at_level(logging.DEBUG, logger="memory_guard.monitoring.inference_monitor"):
+            with patch("memory_guard.integrations.predict_oom", return_value=result):
                 mon = _make_monitor()
                 mon._run_predict_oom(
                     kv_velocity=1.0, utilization=0.5, shed_ready=False

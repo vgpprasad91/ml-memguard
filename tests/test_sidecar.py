@@ -34,8 +34,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from memory_guard.inference_monitor import KVCacheMonitor
-from memory_guard.sidecar import MemGuardSidecar, VLLMMetricsPollFn
+from memory_guard.monitoring.inference_monitor import KVCacheMonitor
+from memory_guard.deployment.sidecar import MemGuardSidecar, VLLMMetricsPollFn
 
 
 # ---------------------------------------------------------------------------
@@ -173,14 +173,14 @@ class TestLastOomProbability:
             "confidence": 0.9,
             "model_source": "ml",
         }
-        with patch("memory_guard.backends.predict_oom", return_value=result):
+        with patch("memory_guard.integrations.predict_oom", return_value=result):
             mon._run_predict_oom(kv_velocity=2.0, utilization=0.85, shed_ready=True)
         assert mon.last_oom_probability == pytest.approx(0.77)
 
     def test_unchanged_when_predict_oom_returns_none(self):
         mon = _make_monitor()
         mon._last_oom_probability = 0.5
-        with patch("memory_guard.backends.predict_oom", return_value=None):
+        with patch("memory_guard.integrations.predict_oom", return_value=None):
             mon._run_predict_oom(kv_velocity=1.0, utilization=0.5, shed_ready=False)
         # Should not change when backend returns None
         assert mon.last_oom_probability == pytest.approx(0.5)

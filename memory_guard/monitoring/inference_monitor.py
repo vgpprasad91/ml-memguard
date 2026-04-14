@@ -7,7 +7,7 @@ caller provides ``poll_fn``; this module never imports vLLM or SGLang.
 
 Usage::
 
-    from memory_guard.inference_monitor import KVCacheMonitor
+    from memory_guard import KVCacheMonitor
 
     def poll():
         # vLLM example:
@@ -38,7 +38,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
-from .constants import (
+from ..constants import (
     KV_CACHE_SHED_LOAD_THRESHOLD,
     KV_CACHE_WARNING_THRESHOLD,
     MONITOR_POLL_INTERVAL,
@@ -162,7 +162,7 @@ class KVCacheMonitor:
                                 keys default to ``0.0``.  Must be
                                 thread-safe.
             telemetry_upload_interval:
-                                Seconds between cloud telemetry uploads
+                                Seconds between optional backend telemetry uploads
                                 (default 30 s).  Independent of
                                 ``poll_interval``.
             telemetry_model_name:
@@ -248,7 +248,7 @@ class KVCacheMonitor:
         self._last_warning_time: float = 0.0
         self._last_shed_load_time: float = 0.0
         self._critical_consecutive: int = 0
-        # PR 31: last cloud-predicted OOM probability (0.0 = no prediction yet)
+        # PR 31: last backend-predicted OOM probability (0.0 = no prediction yet)
         self._last_oom_probability: float = 0.0
 
     # ------------------------------------------------------------------
@@ -277,9 +277,9 @@ class KVCacheMonitor:
 
     @property
     def last_oom_probability(self) -> float:
-        """Most recent OOM probability returned by the cloud predict API.
+        """Most recent OOM probability returned by the active predictor integration.
 
-        Returns 0.0 until the first successful ``POST /v1/predict`` call.
+        Returns 0.0 until the first successful predictor integration call.
         Read by the sidecar ``/readyz`` endpoint to drive Kubernetes
         readiness-gate load-shedding (PR 31).
         """
@@ -332,7 +332,7 @@ class KVCacheMonitor:
         # PR 68: snapshot total physical VRAM once at startup (best-effort)
         self._snapshot_reserved_vram()
 
-        # PR 67: POST the startup memory footprint to the cloud (best-effort)
+        # PR 67: publish the startup memory footprint to the active integration (best-effort)
         self._post_source_baseline()
 
         # Load eBPF probes when requested (Linux + bcc only; silently skips otherwise)
@@ -458,7 +458,7 @@ class KVCacheMonitor:
     def _start_ebpf(self) -> None:
         """Load and start the EBPFProbeManager.  Silently skips on failure."""
         try:
-            from .ebpf import EBPFProbeManager
+            from ..ebpf import EBPFProbeManager
 
             def _on_high(event: object) -> None:
                 logger.debug("[memory-guard] eBPF memory.high: %s", event)
@@ -720,9 +720,9 @@ class KVCacheMonitor:
         utilization: float,
         shed_ready: bool,
     ) -> None:
-        """Call the active predictor backend and fire callbacks.
+        """Call the active predictor integration and fire callbacks.
 
-        Falls back silently to existing rule-based thresholds when no backend
+        Falls back silently to existing rule-based thresholds when no integration
         prediction is available (``predict_oom`` returns ``None``).
 
         Probability → action mapping (matches the reference predictor):
@@ -731,7 +731,7 @@ class KVCacheMonitor:
           p ≤ 0.70 → no action (let reactive thresholds decide)
         """
         try:
-            from .backends import predict_oom as _predict_oom
+            from ..integrations import predict_oom as _predict_oom
 
             extra: Dict[str, Any] = {}
             if self._extended_poll_fn is not None:
@@ -776,7 +776,7 @@ class KVCacheMonitor:
             )
 
             if result is None:
-                # No backend prediction available — fall through to reactive thresholds.
+                # No integration prediction available — fall through to reactive thresholds.
                 return
 
             p            = float(result.get("oom_probability", 0.0))
@@ -819,18 +819,18 @@ class KVCacheMonitor:
             logger.debug("[memory-guard] _run_predict_oom raised: %s", exc)
 
     def _post_source_baseline(self) -> None:
-        """Upload the startup memory footprint to the active backend.
+        """Upload the startup memory footprint to the active integration.
 
         Called once in :meth:`start` after :meth:`_snapshot_cuda_graph_baseline`
         so that ``_cuda_graph_baseline_mb`` is already populated.
 
-        Silently skips when no ``source_id`` is configured, no backend is
+        Silently skips when no ``source_id`` is configured, no integration is
         installed, or any step fails.
         """
         if not self._source_id:
             return
         try:
-            from .backends import upload_source_baseline as _upload_baseline
+            from ..integrations import upload_source_baseline as _upload_baseline
 
             extra: Dict[str, Any] = {}
             if self._extended_poll_fn is not None:
@@ -848,7 +848,7 @@ class KVCacheMonitor:
                 "weights_mb":       float(extra.get("weights_mb",  0.0)),
                 "cuda_ctx_mb":      float(extra.get("cuda_ctx_mb", 0.0)),
                 "cuda_graph_mb":    self._cuda_graph_baseline_mb,
-                # PR 72: multi-GPU topology — lets the backend store device count
+                # PR 72: multi-GPU topology — lets the integration store device count
                 # alongside the combined VRAM and look up the correct catalog SKU
                 "device_count":     self._device_count,
             }
@@ -930,13 +930,13 @@ class KVCacheMonitor:
             logger.debug("KVCacheMonitor local telemetry write failed: %s", exc)
 
     def _upload_inference_telemetry(self, kv_velocity: float) -> None:
-        """Collect extended signals and post to cloud.upload_inference_telemetry.
+        """Collect extended signals and post them to the active integration.
 
-        Silently skips when no API key is configured or any step fails.
+        Silently skips when no integration is installed or any step fails.
         """
         try:
-            from .backends import upload_inference_signals as _upload_signals
-            from .telemetry import InferenceTelemetry
+            from ..integrations import upload_inference_signals as _upload_signals
+            from ..telemetry import InferenceTelemetry
 
             extra: Dict[str, Any] = {}
             if self._extended_poll_fn is not None:
@@ -991,7 +991,7 @@ class KVCacheMonitor:
                 # PR 72: multi-GPU device count; 1 = single-GPU (default)
                 device_count               = self._device_count,
             )
-            # PR 79: always write locally first; cloud upload is optional
+            # PR 79: always write locally first; backend upload is optional
             self._write_local_telemetry(signals)
             _upload_signals(signals)
         except Exception as exc:

@@ -50,7 +50,7 @@ def __getattr__(name: str) -> object:
     raise AttributeError(f"module 'memory_guard' has no attribute {name!r}")
 
 
-from .estimator import (
+from .estimation.estimator import (
     InferenceServingEstimate,
     MemoryEstimate,
     ModelSpec,
@@ -61,7 +61,7 @@ from .estimator import (
     estimate_inference_memory,
     estimate_serving_memory,
 )
-from .platforms import (
+from .monitoring.platforms import (
     detect_platform,
     get_available_memory_mb,
     get_memory_pressure,
@@ -71,21 +71,21 @@ from .platforms import (
     PlatformInfo,
     Backend,
 )
-from .calibration import CalibrationStore, record_training_result
-from .reward import RewardSignal, compute_reward
-from .bandit_state import (
+from .adaptation.calibration import CalibrationStore, record_training_result
+from .adaptation.reward import RewardSignal, compute_reward
+from .adaptation.bandit_state import (
     ConfigAction,
     DeviceFingerprint,
     ModelFingerprint,
     StateKey,
 )
-from .bandit import BanditPolicy, MIN_UPDATES_FOR_CONFIDENCE
+from .adaptation.bandit import BanditPolicy, MIN_UPDATES_FOR_CONFIDENCE
 from .guard import MemoryGuard, SafeConfig, InferenceSafeConfig
-from .inference_monitor import KVCacheMonitor
-from .monitor import RuntimeMonitor
-from .cuda_recovery import CUDAOOMRecovery
-from .watchdog import VLLMWatchdog, guard_vllm_watchdog
-from .downgrade import auto_downgrade, DowngradeResult
+from .monitoring.inference_monitor import KVCacheMonitor
+from .monitoring.monitor import RuntimeMonitor
+from .monitoring.cuda_recovery import CUDAOOMRecovery
+from .deployment.watchdog import VLLMWatchdog, guard_vllm_watchdog
+from .estimation.downgrade import auto_downgrade, DowngradeResult
 
 __all__ = [
     "MemoryGuard",

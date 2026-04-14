@@ -17,7 +17,7 @@ import threading
 import time
 from typing import Callable, Optional
 
-from .constants import (
+from ..constants import (
     PRESSURE_THRESHOLD_WARNING,
     PRESSURE_THRESHOLD_CRITICAL,
     PRESSURE_THRESHOLD_EMERGENCY,
@@ -237,7 +237,7 @@ class RuntimeMonitor:
                         recent = hist[-6:]
                         if all(recent[i] < recent[i + 1] for i in range(len(recent) - 1)):
                             growth_mb = recent[-1] - recent[0]
-                            from .constants import MLX_LEAK_GROWTH_THRESHOLD_MB
+                            from ..constants import MLX_LEAK_GROWTH_THRESHOLD_MB
                             if growth_mb > MLX_LEAK_GROWTH_THRESHOLD_MB:
                                 if not in_cooldown:
                                     self._trigger_downgrade(pressure, "MLX_LEAK")

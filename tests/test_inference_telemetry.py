@@ -8,7 +8,7 @@ Covers:
   - KVCacheMonitor._compute_velocity(): correct MB/s when block_size_mb > 0
   - KVCacheMonitor._compute_velocity(): negative delta (eviction) returns negative rate
   - KVCacheMonitor telemetry upload fires after telemetry_upload_interval
-  - KVCacheMonitor telemetry upload silently skips when no backend installed
+  - KVCacheMonitor telemetry upload silently skips when no optional integration is installed
   - KVCacheMonitor extended_poll_fn dict merged into InferenceTelemetry
   - KVCacheMonitor extended_poll_fn exception does not crash the monitor loop
   - Predictor missing-field defaulting: payload without inference fields is accepted
@@ -22,7 +22,7 @@ from unittest.mock import patch
 import pytest
 
 from memory_guard.telemetry import InferenceTelemetry
-from memory_guard.inference_monitor import KVCacheMonitor
+from memory_guard.monitoring.inference_monitor import KVCacheMonitor
 
 
 # ---------------------------------------------------------------------------
@@ -146,15 +146,15 @@ class TestComputeVelocity:
 
 class TestKVCacheMonitorTelemetryUpload:
     def test_upload_skips_silently_when_no_backend(self):
-        """No backend plugin → _upload_inference_telemetry does not raise."""
+        """No optional integration → _upload_inference_telemetry does not raise."""
         mon = KVCacheMonitor(
             poll_fn=lambda: (50, 100),
             telemetry_upload_interval=0.0,
         )
         mon._last_telemetry_upload = 0.0
-        # With no backend installed, backends.upload_inference_signals returns False
+        # With no optional integration is installed, backends.upload_inference_signals returns False
         # The monitor must not crash or raise.
-        with patch("memory_guard.backends.upload_inference_signals", return_value=False):
+        with patch("memory_guard.integrations.upload_inference_signals", return_value=False):
             mon._upload_inference_telemetry(1.0)  # must not raise
 
     def test_upload_fires_after_interval(self):
@@ -171,7 +171,7 @@ class TestKVCacheMonitorTelemetryUpload:
         )
         mon._last_telemetry_upload = 0.0
 
-        with patch("memory_guard.backends.upload_inference_signals", side_effect=fake_upload):
+        with patch("memory_guard.integrations.upload_inference_signals", side_effect=fake_upload):
             mon._upload_inference_telemetry(2.5)
 
         assert len(calls) == 1
@@ -190,7 +190,7 @@ class TestKVCacheMonitorTelemetryUpload:
             telemetry_upload_interval=0.0,
         )
 
-        with patch("memory_guard.backends.upload_inference_signals",
+        with patch("memory_guard.integrations.upload_inference_signals",
                    side_effect=lambda s: captured.append(s) or True):
             mon._upload_inference_telemetry(0.5)
 
@@ -210,7 +210,7 @@ class TestKVCacheMonitorTelemetryUpload:
             telemetry_upload_interval=0.0,
         )
 
-        with patch("memory_guard.backends.upload_inference_signals", return_value=True):
+        with patch("memory_guard.integrations.upload_inference_signals", return_value=True):
             # Must not raise
             mon._upload_inference_telemetry(0.0)
 
@@ -225,7 +225,7 @@ class TestKVCacheMonitorTelemetryUpload:
             telemetry_os_platform="linux",
         )
 
-        with patch("memory_guard.backends.upload_inference_signals",
+        with patch("memory_guard.integrations.upload_inference_signals",
                    side_effect=lambda s: captured.append(s) or True):
             mon._upload_inference_telemetry(1.0)
 
@@ -240,7 +240,7 @@ class TestKVCacheMonitorTelemetryUpload:
 
 class TestPredictorMissingFieldDefaulting:
     """Verify the Python client sends 0.0 for missing inference fields so
-    the backend plugin stores them as 0 (backward-compatible with old callers)."""
+    the optional integration stores them as 0 (backward-compatible with old callers)."""
 
     def test_default_telemetry_has_zero_inference_fields(self):
         """An InferenceTelemetry() with all defaults produces a payload where
@@ -289,7 +289,7 @@ class TestCudaGraphBaseline:
         )
         mon._cuda_graph_baseline_mb = 2048.0  # inject a known baseline
 
-        with patch("memory_guard.backends.upload_inference_signals",
+        with patch("memory_guard.integrations.upload_inference_signals",
                    side_effect=lambda s: captured.append(s) or True):
             mon._upload_inference_telemetry(1.0)
 
@@ -307,7 +307,7 @@ class TestCudaGraphBaseline:
         mon = KVCacheMonitor(poll_fn=lambda: (50, 100))
         mon._cuda_graph_baseline_mb = 1500.0
 
-        with patch("memory_guard.backends.predict_oom", side_effect=fake_predict):
+        with patch("memory_guard.integrations.predict_oom", side_effect=fake_predict):
             mon._run_predict_oom(2.0, 0.5, True)
 
         assert len(captured) == 1
@@ -327,7 +327,7 @@ class TestCudaGraphBaseline:
         )
         mon._cuda_graph_baseline_mb = 2048.0  # baseline should be overridden
 
-        with patch("memory_guard.backends.upload_inference_signals",
+        with patch("memory_guard.integrations.upload_inference_signals",
                    side_effect=lambda s: captured.append(s) or True):
             mon._upload_inference_telemetry(1.0)
 
@@ -363,7 +363,7 @@ class TestPrefillActivationProbe:
         )
         mon._prefill_peak_activation_mb = 4096.0
 
-        with patch("memory_guard.backends.upload_inference_signals",
+        with patch("memory_guard.integrations.upload_inference_signals",
                    side_effect=lambda s: captured.append(s) or True):
             mon._upload_inference_telemetry(1.0)
 
@@ -384,7 +384,7 @@ class TestPrefillActivationProbe:
         mon._prefill_peak_activation_mb = 2048.0
         mon._max_seq_len_in_flight      = 512
 
-        with patch("memory_guard.backends.predict_oom", side_effect=fake_predict):
+        with patch("memory_guard.integrations.predict_oom", side_effect=fake_predict):
             mon._run_predict_oom(1.0, 0.5, True)
 
         assert len(captured) == 1

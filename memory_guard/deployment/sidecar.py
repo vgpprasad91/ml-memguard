@@ -35,8 +35,8 @@ Standalone usage::
 
 Programmatic usage::
 
-    from memory_guard.sidecar import MemGuardSidecar, VLLMMetricsPollFn
-    from memory_guard.inference_monitor import KVCacheMonitor
+    from memory_guard.deployment.sidecar import MemGuardSidecar, VLLMMetricsPollFn
+    from memory_guard import KVCacheMonitor
 
     poll_fn = VLLMMetricsPollFn("http://vllm:8000")
     monitor = KVCacheMonitor(poll_fn=poll_fn)
@@ -58,7 +58,7 @@ import urllib.request
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 if TYPE_CHECKING:
-    from .inference_monitor import KVCacheMonitor
+    from ..monitoring.inference_monitor import KVCacheMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -386,7 +386,7 @@ def _build_monitor_from_args(
     model_name: str,
     backend: str,
 ) -> "KVCacheMonitor":
-    from .inference_monitor import KVCacheMonitor
+    from ..monitoring.inference_monitor import KVCacheMonitor
 
     poll_fn = VLLMMetricsPollFn(vllm_url)
     return KVCacheMonitor(

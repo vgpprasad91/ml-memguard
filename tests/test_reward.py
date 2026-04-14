@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from memory_guard.reward import (
+from memory_guard.adaptation.reward import (
     EFFICIENCY_WEIGHT,
     OUTCOME_OOM,
     OUTCOME_SUCCESS,
@@ -156,7 +156,7 @@ class TestRecordTrainingResultReturnsReward:
     existing callers that ignore the return value."""
 
     def test_returns_reward_signal(self, tmp_path):
-        from memory_guard.calibration import CalibrationStore, record_training_result
+        from memory_guard.adaptation.calibration import CalibrationStore, record_training_result
         store = CalibrationStore(path=tmp_path / "cal.json")
         result = record_training_result(
             estimated_mb=5_000,
@@ -168,7 +168,7 @@ class TestRecordTrainingResultReturnsReward:
         assert isinstance(result, RewardSignal)
 
     def test_clean_run_returns_positive_outcome(self, tmp_path):
-        from memory_guard.calibration import CalibrationStore, record_training_result
+        from memory_guard.adaptation.calibration import CalibrationStore, record_training_result
         store = CalibrationStore(path=tmp_path / "cal.json")
         result = record_training_result(
             estimated_mb=5_000,
@@ -180,7 +180,7 @@ class TestRecordTrainingResultReturnsReward:
         assert result.outcome == pytest.approx(1.0)
 
     def test_oom_returns_negative_outcome(self, tmp_path):
-        from memory_guard.calibration import CalibrationStore, record_training_result
+        from memory_guard.adaptation.calibration import CalibrationStore, record_training_result
         store = CalibrationStore(path=tmp_path / "cal.json")
         result = record_training_result(
             estimated_mb=5_000,
@@ -193,7 +193,7 @@ class TestRecordTrainingResultReturnsReward:
 
     def test_no_budget_defaults_work(self, tmp_path):
         """Existing callers omitting budget_mb/oom_occurred still work."""
-        from memory_guard.calibration import CalibrationStore, record_training_result
+        from memory_guard.adaptation.calibration import CalibrationStore, record_training_result
         store = CalibrationStore(path=tmp_path / "cal.json")
         result = record_training_result(
             estimated_mb=5_000,
@@ -206,7 +206,7 @@ class TestRecordTrainingResultReturnsReward:
 
     def test_calibration_point_still_recorded(self, tmp_path):
         """The store must still grow — calibration side-effect not dropped."""
-        from memory_guard.calibration import CalibrationStore, record_training_result
+        from memory_guard.adaptation.calibration import CalibrationStore, record_training_result
         store = CalibrationStore(path=tmp_path / "cal.json")
         assert store.num_points == 0
         record_training_result(

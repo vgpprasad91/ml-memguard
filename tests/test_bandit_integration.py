@@ -31,8 +31,8 @@ from pathlib import Path
 
 import pytest
 
-from memory_guard.bandit import BanditPolicy
-from memory_guard.bandit_state import ConfigAction, StateKey
+from memory_guard.adaptation.bandit import BanditPolicy
+from memory_guard.adaptation.bandit_state import ConfigAction, StateKey
 from memory_guard.guard import MemoryGuard
 
 
@@ -53,7 +53,7 @@ _BUDGET_MB = _AVAILABLE_MB * 0.80  # 32 000 MB
 
 def _make_guard(tmp_path: Path, *, enable_bandit: bool = True, **kwargs) -> MemoryGuard:
     """Return a MemoryGuard with all disk I/O pinned to tmp_path."""
-    from memory_guard.calibration import CalibrationStore
+    from memory_guard.adaptation.calibration import CalibrationStore
     store = CalibrationStore(path=tmp_path / "cal.json")
     guard = MemoryGuard(enable_bandit=enable_bandit, enable_calibration=True, **kwargs)
     guard._calibration_store = store

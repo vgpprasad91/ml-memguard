@@ -17,14 +17,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from .bandit import BanditPolicy
-    from .bandit_state import ConfigAction, StateKey
-    from .inference_monitor import KVCacheMonitor
+    from .adaptation.bandit import BanditPolicy
+    from .adaptation.bandit_state import ConfigAction, StateKey
+    from .monitoring.inference_monitor import KVCacheMonitor
 
-from .downgrade import DowngradeResult, auto_downgrade
-from .estimator import InferenceServingEstimate, MemoryEstimate, estimate_serving_memory, estimate_training_memory
-from .monitor import RuntimeMonitor
-from .platforms import Backend, PlatformInfo, detect_platform, get_available_memory_mb
+from .estimation.downgrade import DowngradeResult, auto_downgrade
+from .estimation.estimator import InferenceServingEstimate, MemoryEstimate, estimate_serving_memory, estimate_training_memory
+from .monitoring.monitor import RuntimeMonitor
+from .monitoring.platforms import Backend, PlatformInfo, detect_platform, get_available_memory_mb
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +175,7 @@ class MemoryGuard:
 
         self._calibration_store = None
         if enable_calibration:
-            from .calibration import CalibrationStore
+            from .adaptation.calibration import CalibrationStore
             self._calibration_store = CalibrationStore()
 
         self._last_estimate_mb: Optional[float] = None  # For post-training recording
@@ -184,7 +184,7 @@ class MemoryGuard:
         self._last_state_key: Optional[StateKey] = None
 
         if enable_bandit:
-            from .bandit import BanditPolicy as _BP
+            from .adaptation.bandit import BanditPolicy as _BP
             self._policy = _BP.load()
 
     @classmethod
@@ -269,7 +269,7 @@ class MemoryGuard:
         available = self.available_mb
         budget = self.budget_mb  # Includes swap credit
 
-        from .estimator import ModelSpec, TrainSpec
+        from .estimation.estimator import ModelSpec, TrainSpec
 
         model_spec = ModelSpec(
             params=model_params, hidden_dim=hidden_dim,
@@ -277,7 +277,7 @@ class MemoryGuard:
         )
 
         # ---- RL bandit: consult policy before binary-search ----------------
-        from .bandit_state import ConfigAction, StateKey
+        from .adaptation.bandit_state import ConfigAction, StateKey
         state_key = StateKey.from_values(
             available_mb=available,
             backend=self.platform.backend.value,
@@ -315,7 +315,7 @@ class MemoryGuard:
                 p_est = estimate_training_memory(model=model_spec, train=p_train_spec)
                 p_eff_mb = p_est.total_mb
                 if self.enable_calibration and self._calibration_store:
-                    from .calibration import apply_calibration
+                    from .adaptation.calibration import apply_calibration
                     p_corr, _ = apply_calibration(
                         p_est.total_mb,
                         backend=self.platform.backend.value,
@@ -369,7 +369,7 @@ class MemoryGuard:
         # est.total_mb, or __str__() will show component sum != total.
         effective_mb = est.total_mb
         if self.enable_calibration and self._calibration_store:
-            from .calibration import apply_calibration
+            from .adaptation.calibration import apply_calibration
             corrected_mb, factor = apply_calibration(
                 est.total_mb, backend=self.platform.backend.value,
                 store=self._calibration_store,
@@ -513,7 +513,7 @@ class MemoryGuard:
         )
 
         # ---- RL bandit: consult policy before binary-search ----------------
-        from .bandit_state import ConfigAction, StateKey
+        from .adaptation.bandit_state import ConfigAction, StateKey
         state_key = StateKey.from_values(
             available_mb=available,
             backend=self.platform.backend.value,
@@ -670,7 +670,7 @@ class MemoryGuard:
 
         # Auto-detect actual peak if not provided
         if actual_peak_mb is None:
-            from .platforms import get_mlx_peak_memory_mb
+            from .monitoring.platforms import get_mlx_peak_memory_mb
             actual_peak_mb = get_mlx_peak_memory_mb()
 
         if actual_peak_mb is None:
@@ -689,7 +689,7 @@ class MemoryGuard:
             logger.debug("No estimate available to calibrate against")
             return
 
-        from .calibration import record_training_result
+        from .adaptation.calibration import record_training_result
         reward = record_training_result(
             estimated_mb=self._last_estimate_mb,
             actual_peak_mb=actual_peak_mb,
@@ -722,7 +722,7 @@ class MemoryGuard:
 
         # Fleet telemetry — fire-and-forget, never raises
         try:
-            from .backends import record_training_result as _record_training
+            from .integrations import record_training_result as _record_training
             _sk = self._last_state_key
             _act = self._last_action
             _record_training({

@@ -32,7 +32,7 @@ Design contract
 Quick start::
 
     from memory_guard import BanditPolicy
-    from memory_guard.watchdog import guard_vllm_watchdog
+    from memory_guard import guard_vllm_watchdog
 
     watchdog = guard_vllm_watchdog(
         model="meta-llama/Meta-Llama-3-8B-Instruct",
@@ -45,9 +45,9 @@ Quick start::
 
 Lower-level usage with an existing bandit::
 
-    from memory_guard.watchdog import VLLMWatchdog
-    from memory_guard.bandit import BanditPolicy
-    from memory_guard.bandit_state import StateKey
+    from memory_guard import VLLMWatchdog
+    from memory_guard import BanditPolicy
+    from memory_guard import StateKey
 
     bandit = BanditPolicy.load()
     state_key = StateKey.from_values(...)
@@ -76,9 +76,9 @@ import time
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from .bandit import BanditPolicy
-from .bandit_state import ConfigAction, StateKey
-from .platforms import detect_platform, get_available_memory_mb
+from ..adaptation.bandit import BanditPolicy
+from ..adaptation.bandit_state import ConfigAction, StateKey
+from ..monitoring.platforms import detect_platform, get_available_memory_mb
 
 logger = logging.getLogger(__name__)
 

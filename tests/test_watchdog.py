@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import pytest
 
-from memory_guard.watchdog import (
+from memory_guard.deployment.watchdog import (
     OOM_EXIT_CODES,
     OOM_PATTERNS,
     VLLMWatchdog,
@@ -37,8 +37,8 @@ from memory_guard.watchdog import (
     _patch_flag,
     guard_vllm_watchdog,
 )
-from memory_guard.bandit import BanditPolicy
-from memory_guard.bandit_state import ConfigAction
+from memory_guard.adaptation.bandit import BanditPolicy
+from memory_guard.adaptation.bandit_state import ConfigAction
 
 
 # ---------------------------------------------------------------------------

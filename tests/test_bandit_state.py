@@ -19,7 +19,7 @@ import sys
 
 import pytest
 
-from memory_guard.bandit_state import (
+from memory_guard.adaptation.bandit_state import (
     MEMORY_TIER_BOUNDARIES_MB,
     MEMORY_TIER_LABELS,
     PARAM_CLASS_BOUNDARIES,

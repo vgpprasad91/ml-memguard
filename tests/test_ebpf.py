@@ -302,7 +302,7 @@ class TestEBPFProbeManagerDispatch:
 
 class TestKVCacheMonitorEBPFIntegration:
     def _make_monitor(self, use_ebpf: bool = False):
-        from memory_guard.inference_monitor import KVCacheMonitor
+        from memory_guard.monitoring.inference_monitor import KVCacheMonitor
         return KVCacheMonitor(poll_fn=lambda: (0, 1), use_ebpf=use_ebpf)
 
     def test_use_ebpf_false_manager_stays_none(self):
@@ -317,7 +317,7 @@ class TestKVCacheMonitorEBPFIntegration:
         """With use_ebpf=True, _start_ebpf() is called during start()."""
         mon = self._make_monitor(use_ebpf=True)
         with patch.object(mon, "_start_ebpf") as mock_start_ebpf:
-            with patch("memory_guard.inference_monitor.KVCacheMonitor._loop"):
+            with patch("memory_guard.monitoring.inference_monitor.KVCacheMonitor._loop"):
                 mon.start()
                 mon.stop()
         mock_start_ebpf.assert_called_once()
